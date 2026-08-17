@@ -143,6 +143,12 @@ jupyter notebook --ip=0.0.0.0 --port=8889 --no-browser
 Mở `collect_drive.ipynb` trong giao diện vừa khởi động và chạy từng cell từ trên
 xuống dưới.
 
+Notebook bắt buộc chạy camera check riêng trước khi tạo collector. Kết quả đúng
+phải có `Camera OK`, backend (`csi-gstreamer` hoặc `usb-v4l2-index-0`), FPS và
+ảnh `reports/camera_sample.jpg`. Nếu camera check lỗi thì không bỏ qua cell để
+ARM xe. Đóng mọi kernel/notebook camera cũ; chỉ khi camera đã được release mới
+thử `sudo systemctl restart nvargus-daemon`.
+
 Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → xác nhận xe đã kê → `TEST SERVO` →
 `TEST MOTOR 0.5S` → `MỞ CAMERA` → `ARM TAY CẦM` → giữ đúng nút dead-man →
 `BẮT ĐẦU GHI`. Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping

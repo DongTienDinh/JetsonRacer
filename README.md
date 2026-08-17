@@ -113,6 +113,9 @@ jupyter notebook --ip=0.0.0.0 --port=8889 --no-browser
 
 Sau đó mở `collect_drive.ipynb` từ giao diện Jupyter và chạy lần lượt từng cell.
 Notebook đã có sẵn kiểm tra đường dẫn, launcher và cell in trạng thái chẩn đoán.
+Trước khi dựng giao diện, notebook chạy `tools/check_hardware.py` để mở camera
+3 giây, ghi `reports/camera_sample.jpg` rồi release. Nếu bước này thất bại thì
+không ARM xe.
 
 Kiểm tra widget trước khi chạy:
 
@@ -138,6 +141,16 @@ Hai bảng `Axes live` và `Buttons đang bấm` luôn cập nhật trước c�
 `TEST SERVO/MOTOR` không làm phần cứng chuyển động với backend `nvidia`, lỗi nằm
 ở driver/nguồn/dây xe chứ không nằm ở mapping tay cầm. Các nút test bị khóa cho
 đến khi người vận hành xác nhận `BÁNH XE ĐÃ KÊ KHỎI MẶT ĐẤT`.
+
+Camera ghi rõ backend thực tế trên giao diện: `csi-gstreamer` hoặc
+`usb-v4l2-index-0`. Trường hợp OpenCV báo camera đã open nhưng frame đầu thất
+bại, code thử lại nhiều lần rồi mới fallback; exception trong thread camera
+được đưa ra log và có thể bấm `MỞ CAMERA` để thử lại. Trước khi restart dịch vụ
+camera, đóng tất cả notebook/kernel đang dùng camera:
+
+```bash
+sudo systemctl restart nvargus-daemon
+```
 
 Chạy thử giao diện bằng video trên laptop, hoàn toàn không điều khiển motor:
 

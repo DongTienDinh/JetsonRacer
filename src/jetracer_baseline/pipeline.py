@@ -142,6 +142,11 @@ class Runner(object):
 
         grabber_cls = SyncGrabber if sync else LatestFrameGrabber
         self.grabber = grabber_cls(source).start()
+        startup_error = getattr(self.grabber, 'error', None)
+        if startup_error is not None:
+            self.grabber.stop()
+            raise RuntimeError('Camera/source khong khoi dong duoc: %s' %
+                               startup_error)
         self.lane = LaneDetector(cfg)
         self.stopline = StoplineDetector(cfg)
         self.tracker = SignTracker(cfg)

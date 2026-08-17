@@ -31,7 +31,8 @@ import time
 
 import cv2
 
-from jetracer_baseline.camera import LatestFrameGrabber, build_source
+from jetracer_baseline.camera import (LatestFrameGrabber, build_source,
+                                      format_camera_environment)
 from jetracer_baseline.config import load_config
 from jetracer_baseline.control.driver import build_driver
 
@@ -471,18 +472,21 @@ class ManualDriveCollector(object):
                 self._zero_command()
             time.sleep(1.0 / 30.0)
 
-    def _camera_loop(self):
+    def _camera_loop(self, grabber):
         last_frame_id = -1
         last_preview = 0.0
         last_save = 0.0
         fps_t0 = time.monotonic()
         fps_frames = 0
 
-        while not self._stop_event.is_set() and self._grabber is not None:
-            frame, frame_id = self._grabber.read()
+        while not self._stop_event.is_set():
+            frame, frame_id = grabber.read()
             if frame is None or frame_id == last_frame_id:
-                if getattr(self._grabber, 'eof', False):
-                    self._log('Nguon camera/video da ket thuc.')
+                if getattr(grabber, 'eof', False) or grabber.error is not None:
+                    if grabber.error is not None:
+                        self._log('CAMERA DUNG DO LOI: %s' % grabber.error)
+                    else:
+                        self._log('Nguon camera/video da ket thuc.')
                     break
                 time.sleep(0.005)
                 continue
@@ -530,13 +534,29 @@ class ManualDriveCollector(object):
         if self._armed:
             self._armed = False
             self._zero_command()
-        self._set_status('camera da dung')
+        if self._recording:
+            self._log('Camera dung -> tu dong dong session dang ghi.')
+            self._stop_recording()
+        try:
+            grabber.stop()
+        except Exception as exc:
+            self._log('Loi release camera: %s' % exc)
+        if self._grabber is grabber:
+            self._grabber = None
+        if grabber.error is not None:
+            self._set_status('CAMERA LOI - xem log; co the bam MO CAMERA de thu lai')
+        else:
+            self._set_status('camera da dung; co the bam MO CAMERA de mo lai')
 
     def _on_open_camera(self, _button=None):
         if self._grabber is not None:
             self._log('Camera dang mo.')
             return
+        source = None
+        grabber = None
         try:
+            self._log('Dang mo camera kind=%s, %s' % (
+                self.source_kind, format_camera_environment()))
             source = build_source(
                 self.cfg, self.source_kind, video_path=self.video_path)
             if self.source_kind == 'video':
@@ -544,24 +564,49 @@ class ManualDriveCollector(object):
                 if video_fps <= 0:
                     video_fps = self.cfg.get('camera.fps', 20)
                 source = _PacedFrameSource(source, video_fps)
-            self._grabber = LatestFrameGrabber(source).start()
-            frame, frame_id = self._grabber.read()
+            grabber = LatestFrameGrabber(source).start()
+            frame, frame_id = grabber.read()
             if frame is None:
-                self._grabber.stop()
-                self._grabber = None
+                error = grabber.error
+                grabber.stop()
+                grabber = None
+                source = None
+                if error is not None:
+                    raise IOError(str(error))
                 raise IOError('Mo duoc nguon nhung khong nhan frame trong 5 giay')
+            self._grabber = grabber
             self._stop_event.clear()
-            self._camera_thread = threading.Thread(target=self._camera_loop)
+            self._camera_thread = threading.Thread(
+                target=self._camera_loop, args=(grabber,))
             self._camera_thread.daemon = True
             self._camera_thread.start()
             self._ensure_control_thread()
             h, w = frame.shape[:2]
-            self._set_status('camera OK %dx%d; chua ARM motor' % (w, h))
-            self._log('Camera OK: %dx%d, frame_id=%d' % (w, h, frame_id))
+            backend = getattr(source, 'backend', self.source_kind)
+            self._set_status(
+                'camera OK %dx%d backend=%s; chua ARM motor' %
+                (w, h, backend))
+            self._log('Camera OK: %dx%d, frame_id=%d, backend=%s' %
+                      (w, h, frame_id, backend))
+            for note in getattr(source, 'startup_notes', []):
+                self._log('Camera note: %s' % note)
         except Exception as exc:
+            if grabber is not None:
+                try:
+                    grabber.stop()
+                except Exception:
+                    pass
+            elif source is not None:
+                try:
+                    source.release()
+                except Exception:
+                    pass
             self._grabber = None
             self._set_status('LOI CAMERA')
             self._log('Khong mo duoc camera: %s' % exc)
+            self._log(
+                'Dong cac notebook/kernel camera khac. Neu dung CSI, thu trong '
+                'terminal: sudo systemctl restart nvargus-daemon')
 
     def _on_arm(self, _button=None):
         if self._grabber is None:

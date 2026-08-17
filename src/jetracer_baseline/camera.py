@@ -5,6 +5,7 @@ Diem quan trong: luong capture LUON giu frame moi nhat va vut frame cu.
 Neu dung queue, vong dieu khien se xu ly anh tre -> xe lai theo qua khu.
 """
 
+import glob
 import threading
 import time
 
@@ -20,8 +21,31 @@ def gstreamer_pipeline(width, height, fps, flip_method=0):
         'format=(string)NV12, framerate=(fraction){fps}/1 ! '
         'nvvidconv flip-method={flip} ! '
         'video/x-raw, width=(int){w}, height=(int){h}, format=(string)BGRx ! '
-        'videoconvert ! video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1'
+        'videoconvert ! video/x-raw, format=(string)BGR ! '
+        'appsink drop=true max-buffers=1 sync=false'
     ).format(cw=width, ch=height, fps=fps, flip=flip_method, w=width, h=height)
+
+
+def camera_environment_report():
+    """Thong tin chi doc de hien thi khi camera Jetson khong mo duoc."""
+    info = cv2.getBuildInformation()
+    gstreamer = 'UNKNOWN'
+    for line in info.split('\n'):
+        if line.strip().startswith('GStreamer'):
+            gstreamer = line.split(':', 1)[-1].strip()
+            break
+    return {
+        'opencv': getattr(cv2, '__version__', '?'),
+        'gstreamer': gstreamer,
+        'video_devices': sorted(glob.glob('/dev/video*')),
+    }
+
+
+def format_camera_environment(report=None):
+    report = report or camera_environment_report()
+    devices = ','.join(report.get('video_devices') or []) or '(khong co)'
+    return 'OpenCV=%s, GStreamer=%s, devices=%s' % (
+        report.get('opencv', '?'), report.get('gstreamer', '?'), devices)
 
 
 class FrameSource(object):
@@ -99,22 +123,105 @@ class VideoSource(FrameSource):
 class CSISource(FrameSource):
     """Camera CSI tren Jetson qua GStreamer."""
 
-    def __init__(self, width, height, fps, flip_method=0):
-        pipeline = gstreamer_pipeline(width, height, fps, flip_method)
-        self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    def __init__(self, width, height, fps, flip_method=0,
+                 allow_usb_fallback=True, usb_index=0,
+                 startup_attempts=15, startup_delay_s=0.10):
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = int(fps)
+        self.flip_method = int(flip_method)
+        self.allow_usb_fallback = bool(allow_usb_fallback)
+        self.usb_index = int(usb_index)
+        self.startup_attempts = max(1, int(startup_attempts))
+        self.startup_delay_s = max(0.0, float(startup_delay_s))
+        self.pipeline = gstreamer_pipeline(
+            self.width, self.height, self.fps, self.flip_method)
+        self.backend = 'csi-gstreamer'
+        self.startup_notes = []
+        self.last_error = None
+        self._needs_warmup = True
+
+        self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
         if not self.cap.isOpened():
-            # Fallback: USB camera / dev khong co Jetson
-            self.cap = cv2.VideoCapture(0)
-            if not self.cap.isOpened():
-                raise IOError('Khong mo duoc camera (CSI lan fallback index 0)')
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            reason = 'OpenCV khong open duoc pipeline nvarguscamerasrc'
+            self.startup_notes.append(reason)
+            if self.allow_usb_fallback:
+                self._switch_to_usb(reason)
+            else:
+                self.cap.release()
+                raise IOError(self._failure_message(reason))
+
+    def _failure_message(self, reason):
+        return (
+            '%s. %s. Kiem tra cap CSI, tien trinh/kernel khac dang giu camera, '
+            'va thu `sudo systemctl restart nvargus-daemon` sau khi da dong '
+            'tat ca notebook camera.' % (reason, format_camera_environment()))
+
+    def _switch_to_usb(self, reason):
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        self.startup_notes.append(
+            'CSI loi (%s) -> thu USB/V4L2 index %d' % (reason, self.usb_index))
+        self.cap = cv2.VideoCapture(self.usb_index)
+        self.backend = 'usb-v4l2-index-%d' % self.usb_index
+        if not self.cap.isOpened():
+            self.cap.release()
+            raise IOError(self._failure_message(
+                'CSI va USB/V4L2 index %d deu khong open duoc' % self.usb_index))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        self._needs_warmup = True
+
+    def _read_with_warmup(self):
+        last_exception = None
+        for _ in range(self.startup_attempts):
+            try:
+                ok, frame = self.cap.read()
+            except Exception as exc:
+                ok, frame = False, None
+                last_exception = exc
+            if ok and frame is not None:
+                self.last_error = None
+                return True, frame
+            if self.startup_delay_s > 0:
+                time.sleep(self.startup_delay_s)
+        detail = 'khong co frame sau %d lan doc' % self.startup_attempts
+        if last_exception is not None:
+            detail += ' (%s)' % last_exception
+        self.last_error = detail
+        return False, None
 
     def read(self):
-        return self.cap.read()
+        if self._needs_warmup:
+            self._needs_warmup = False
+            ok, frame = self._read_with_warmup()
+            if ok:
+                return ok, frame
+            if self.backend == 'csi-gstreamer' and self.allow_usb_fallback:
+                self._switch_to_usb(self.last_error)
+                self._needs_warmup = False
+                ok, frame = self._read_with_warmup()
+                if ok:
+                    return ok, frame
+            raise IOError(self._failure_message(
+                '%s (%s)' % (self.backend, self.last_error)))
+
+        try:
+            ok, frame = self.cap.read()
+        except Exception as exc:
+            self.last_error = '%s read exception: %s' % (self.backend, exc)
+            raise IOError(self.last_error)
+        if not ok or frame is None:
+            self.last_error = '%s da mo nhung mat frame trong luc chay' % self.backend
+            return False, None
+        return True, frame
 
     def release(self):
-        self.cap.release()
+        if self.cap is not None:
+            self.cap.release()
 
 
 class SyncGrabber(object):
@@ -169,32 +276,49 @@ class LatestFrameGrabber(object):
     on dinh, la dieu kien de dat FPS >= 20 (Diem FPS cua Speed Track).
     """
 
-    def __init__(self, source):
+    def __init__(self, source, wait_timeout_s=5.0):
         self.source = source
+        self.wait_timeout_s = max(0.05, float(wait_timeout_s))
         self._lock = threading.Lock()
         self._frame = None
         self._frame_id = 0
         self._stopped = False
         self._eof = False
+        self._error = None
         self._thread = threading.Thread(target=self._loop)
         self._thread.daemon = True
 
     def start(self):
         self._thread.start()
         # Cho frame dau tien (toi da 5 s) de pipeline khong chay khong
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
+        deadline = time.monotonic() + self.wait_timeout_s
+        while time.monotonic() < deadline:
             with self._lock:
-                if self._frame is not None or self._eof:
+                if self._frame is not None or self._eof or self._error is not None:
                     return self
             time.sleep(0.005)
+        with self._lock:
+            if self._frame is None and self._error is None:
+                self._error = IOError(
+                    'Timeout %.1f s khi cho frame camera dau tien' %
+                    self.wait_timeout_s)
         return self
 
     def _loop(self):
         while not self._stopped:
-            ok, frame = self.source.read()
+            try:
+                ok, frame = self.source.read()
+            except Exception as exc:
+                with self._lock:
+                    self._error = exc
+                    self._eof = True
+                break
             if not ok:
-                self._eof = True
+                detail = getattr(self.source, 'last_error', None)
+                with self._lock:
+                    if detail:
+                        self._error = IOError(str(detail))
+                    self._eof = True
                 break
             with self._lock:
                 self._frame = frame
@@ -214,11 +338,20 @@ class LatestFrameGrabber(object):
     def eof(self):
         return self._eof
 
+    @property
+    def error(self):
+        with self._lock:
+            return self._error
+
     def stop(self):
         self._stopped = True
         if self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=0.5)
+        # VideoCapture.read() cua nvargus co the dang block. Release capture de
+        # pha block, sau do cho thread them mot nhip de thoat sach.
         self.source.release()
+        if self._thread.is_alive():
+            self._thread.join(timeout=0.5)
 
 
 def build_source(cfg, kind, video_path=None, n_frames=None):
@@ -237,4 +370,9 @@ def build_source(cfg, kind, video_path=None, n_frames=None):
         cfg.get('camera.width', 640),
         cfg.get('camera.height', 480),
         cfg.get('camera.fps', 30),
+        flip_method=cfg.get('camera.flip_method', 0),
+        allow_usb_fallback=cfg.get('camera.allow_usb_fallback', True),
+        usb_index=cfg.get('camera.usb_index', 0),
+        startup_attempts=cfg.get('camera.startup_attempts', 15),
+        startup_delay_s=cfg.get('camera.startup_delay_s', 0.10),
     )

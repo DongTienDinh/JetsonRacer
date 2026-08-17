@@ -89,7 +89,9 @@ def check_config():
 def check_camera(cfg, seconds, out_dir):
     step(3, 'Camera')
     import cv2
-    from jetracer_baseline.camera import build_source
+    from jetracer_baseline.camera import build_source, format_camera_environment
+
+    print('       Moi truong: %s' % format_camera_environment())
 
     try:
         source = build_source(cfg, 'csi')
@@ -99,7 +101,10 @@ def check_camera(cfg, seconds, out_dir):
               'Thu: ls /dev/video*  hoac  nvgstcapture-1.0')
         return False
 
+    print('       Backend ban dau: %s' % getattr(source, 'backend', 'khong ro'))
+
     n, t0, first = 0, time.time(), None
+    read_error = None
     try:
         while (time.time() - t0) < seconds:
             ok, frame = source.read()
@@ -108,11 +113,24 @@ def check_camera(cfg, seconds, out_dir):
             if first is None:
                 first = frame
             n += 1
+    except Exception as exc:
+        read_error = exc
     finally:
         source.release()
 
+    print('       Backend su dung: %s' % getattr(source, 'backend', 'khong ro'))
+    for note in getattr(source, 'startup_notes', []):
+        print('       Note: %s' % note)
+
+    if read_error is not None:
+        print('%s Camera open nhung doc frame bi loi: %s' % (FAIL, read_error))
+        return False
+
     if n == 0 or first is None:
         print('%s Mo duoc camera nhung khong doc duoc frame nao.' % FAIL)
+        detail = getattr(source, 'last_error', None)
+        if detail:
+            print('       Chi tiet: %s' % detail)
         return False
 
     dt = time.time() - t0
