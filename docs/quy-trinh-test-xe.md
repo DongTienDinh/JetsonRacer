@@ -136,15 +136,20 @@ python3 tools/collect_dataset.py --mode video --session sang_som --seconds 120 -
 Để vừa lái tay vừa lưu ảnh và nhãn điều khiển đồng bộ, mở notebook tại thư mục
 gốc dự án rồi chạy:
 
-```python
-%run tools/collect_drive_jupyter.py
+```bash
+jupyter notebook --ip=0.0.0.0 --port=8889 --no-browser
 ```
 
-Thứ tự trên giao diện: `MỞ CAMERA` → kiểm tra đúng hướng ảnh → `ARM TAY CẦM` →
-giữ `LB/button 4` → `BẮT ĐẦU GHI`. Lần đầu vẫn phải kê bánh khỏi mặt đất để xác
-nhận dấu steering/throttle. Nút `DỪNG KHẨN CẤP` dừng ghi, đưa cả ga và lái về 0,
-rồi DISARM. Dữ liệu nằm trong `data/driving/<session_timestamp>/`; không chia
-ngẫu nhiên frame của cùng session sang cả train và validation.
+Mở `collect_drive.ipynb` trong giao diện vừa khởi động và chạy từng cell từ trên
+xuống dưới.
+
+Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → xác nhận xe đã kê → `TEST SERVO` →
+`TEST MOTOR 0.5S` → `MỞ CAMERA` → `ARM TAY CẦM` → giữ đúng nút dead-man →
+`BẮT ĐẦU GHI`. Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping
+thật của từng loại tay cầm; không giả định mọi tay cầm đều là axes 2/1 và button
+4. Nút `DỪNG KHẨN CẤP` hủy cả bài test actuator đang chạy, dừng ghi, đưa ga/lái
+về 0 rồi DISARM. Dữ liệu nằm trong `data/driving/<session_timestamp>/`; không
+chia ngẫu nhiên frame của cùng session sang cả train và validation.
 
 Đây là thứ cho phép cả đội làm việc offline suốt tuần sau mà không cần tranh xe.
 

@@ -8,8 +8,10 @@ PyYAML>=5.1
 
 # === Giao dien thu du lieu lai xe trong Jupyter (thuong da co san tren xe) ===
 # Neu lenh `import ipywidgets` bao loi, cai trong venv --system-site-packages:
-# ipywidgets>=7.5,<8
-# traitlets>=4.3
+# Python 3.6: dung cac ban da khoa sau, khong cai ban moi nhat (can Python moi):
+# ipywidgets==7.6.5
+# widgetsnbextension==3.5.2
+# traitlets==4.3.3
 
 # === Phan tich log / bieu do cho paper (chi can tren laptop) ===
 matplotlib>=3.0

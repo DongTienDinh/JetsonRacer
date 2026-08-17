@@ -107,9 +107,12 @@ python3 tools/collect_dataset.py --session chieu_nang --out data/raw --every 0.2
 
 Thu dữ liệu lái xe đồng bộ `ảnh + steering + throttle` trong Jupyter:
 
-```python
-%run tools/collect_drive_jupyter.py
+```bash
+jupyter notebook --ip=0.0.0.0 --port=8889 --no-browser
 ```
+
+Sau đó mở `collect_drive.ipynb` từ giao diện Jupyter và chạy lần lượt từng cell.
+Notebook đã có sẵn kiểm tra đường dẫn, launcher và cell in trạng thái chẩn đoán.
 
 Kiểm tra widget trước khi chạy:
 
@@ -124,11 +127,17 @@ OpenCV/CUDA/TensorRT của JetPack:
 pip install "ipywidgets>=7.5,<8" "traitlets>=4.3"
 ```
 
-Giao diện bắt buộc đi theo thứ tự `MỞ CAMERA → ARM TAY CẦM → BẮT ĐẦU GHI`.
+Giao diện đi theo thứ tự `KIỂM TRA TAY CẦM → TEST SERVO/MOTOR khi xe đã kê →
+MỞ CAMERA → ARM TAY CẦM → BẮT ĐẦU GHI`.
 Mặc định phải giữ nút `LB` (`button 4`) thì xe mới nhận ga và ga bị giới hạn ở
 `0.20`. Mỗi session được lưu riêng tại `data/driving/<session_timestamp>/` gồm
 ảnh gốc, `labels.csv` và `metadata.json`. Với dataset segmentation bài 1, để
 `Lưu FPS = 5`; nếu sau này train imitation learning thì tăng lên 15–20 FPS.
+
+Hai bảng `Axes live` và `Buttons đang bấm` luôn cập nhật trước cả khi ARM. Nếu
+`TEST SERVO/MOTOR` không làm phần cứng chuyển động với backend `nvidia`, lỗi nằm
+ở driver/nguồn/dây xe chứ không nằm ở mapping tay cầm. Các nút test bị khóa cho
+đến khi người vận hành xác nhận `BÁNH XE ĐÃ KÊ KHỎI MẶT ĐẤT`.
 
 Chạy thử giao diện bằng video trên laptop, hoàn toàn không điều khiển motor:
 
