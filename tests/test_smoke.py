@@ -47,6 +47,8 @@ def test_config_loads():
     cfg = load_config(CONFIG)
     assert cfg.get('control.v_max') > 0
     assert cfg.get('pipeline.control_hz') >= 20
+    assert cfg.get('control.driver.i2c_address') == 0x40
+    assert cfg.get('control.driver.i2c_address2') == 0x40
     # Doc override phai ghi de dung, khong lam mat khoa khac
     cfg2 = load_config(CONFIG, [os.path.join(ROOT, 'configs', 'fast.yaml')])
     assert cfg2.get('control.v_max') > cfg.get('control.v_max')
@@ -248,6 +250,61 @@ def test_nvidia_driver_finds_sibling_repo_without_install():
         else:
             os.environ['JETRACER_NVIDIA_ROOT'] = old_env
         shutil.rmtree(temp_root)
+
+
+def test_nvidia_driver_passes_only_supported_i2c_addresses():
+    """Ho tro ca driver chuan (mot dia chi) va image cu (hai dia chi)."""
+    class StandardDriver(object):
+        i2c_address = 0x40
+
+        @classmethod
+        def class_traits(cls):
+            return {'i2c_address': object()}
+
+    class LegacyDriver(object):
+        i2c_address = 0x40
+        i2c_address2 = 0x60
+
+        @classmethod
+        def class_traits(cls):
+            return {'i2c_address': object(), 'i2c_address2': object()}
+
+    standard = driver_mod._nvidia_constructor_kwargs(
+        StandardDriver, i2c_address=0x40, i2c_address2=0x40)
+    legacy = driver_mod._nvidia_constructor_kwargs(
+        LegacyDriver, i2c_address=0x40, i2c_address2=0x40)
+
+    assert standard == {'i2c_address': 0x40}
+    assert legacy == {'i2c_address': 0x40, 'i2c_address2': 0x40}
+
+
+def test_nvidia_driver_wraps_wrong_0x60_with_actionable_error():
+    class BrokenDriver(object):
+        i2c_address = 0x40
+        i2c_address2 = 0x60
+
+        @classmethod
+        def class_traits(cls):
+            return {'i2c_address': object(), 'i2c_address2': object()}
+
+        def __init__(self, **_kwargs):
+            raise ValueError('No I2C device at address: 0x60')
+
+    original_loader = driver_mod._load_nvidia_racecar
+    try:
+        driver_mod._load_nvidia_racecar = lambda: (
+            BrokenDriver, '/fake/jetracer/nvidia_racecar.py')
+        try:
+            driver_mod.NvidiaJetRacerDriver(
+                i2c_address=0x40, i2c_address2=0x40)
+            assert False, 'Phai bao loi khi driver van truy cap 0x60'
+        except RuntimeError as exc:
+            message = str(exc)
+            assert 'i2c_address2=0x40' in message
+            assert 'sai bien the driver' in message
+            assert 'i2cdetect -y -r 1' in message
+    finally:
+        driver_mod._load_nvidia_racecar = original_loader
 
 
 def test_latest_grabber_surfaces_background_camera_error():

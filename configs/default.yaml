@@ -64,6 +64,11 @@ control:
     # None (để trống / xoá dòng) = không đụng tới thuộc tính đó, giữ mặc định
     # thư viện jetracer. steering_offset: 0.0 là một lệnh có ý nghĩa ("đặt về
     # 0"), khác "đừng đụng vào" - xem control.txt của BTC để biết giá trị chốt.
+    # JetRacer Pro/Waveshare dùng PCA9685 ở 0x40. Một số image cũ có thêm
+    # i2c_address2 mặc định 0x60; đặt cả hai về 0x40 để không gọi nhầm mạch.
+    # Nếu i2cdetect của xe cho địa chỉ khác, sửa theo kết quả quét thực tế.
+    i2c_address: 0x40
+    i2c_address2: 0x40
     steering_gain: -1.0
     steering_offset: 0.0     # bù lệch cơ khí servo - đo lại trên xe thật
     throttle_gain:            # để trống: giữ mặc định thư viện, cùng hệ quy chiếu BTC

@@ -84,6 +84,65 @@ def _clip(value, low, high):
     return value
 
 
+def _nvidia_constructor_kwargs(cls, i2c_address=None, i2c_address2=None):
+    """Tao kwargs I2C phu hop voi dung bien the ``NvidiaRacecar`` dang cai.
+
+    NVIDIA/Waveshare da phat hanh nhieu bien the cung ten class. Ban chuan va
+    ban ``ws/pro`` dung ``i2c_address``; mot so image cu co them
+    ``i2c_address2`` va mac dinh no la 0x60. Chi truyen trait ma class thuc su
+    ho tro de khong lam hong kha nang tuong thich voi cac image con lai.
+    """
+    supported = set()
+    try:
+        supported.update(cls.class_traits().keys())
+    except (AttributeError, TypeError):
+        pass
+
+    for name in ('i2c_address', 'i2c_address2'):
+        if hasattr(cls, name):
+            supported.add(name)
+
+    requested = {
+        'i2c_address': i2c_address,
+        'i2c_address2': i2c_address2,
+    }
+    return dict((name, value) for name, value in requested.items()
+                if value is not None and name in supported)
+
+
+def _format_i2c_address(value):
+    try:
+        return '0x%02x' % int(value)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _nvidia_init_error(exc, module_path, constructor_kwargs):
+    """Doi loi I2C kho hieu thanh huong dan co the kiem tra ngay tren xe."""
+    requested = ', '.join(
+        '%s=%s' % (name, _format_i2c_address(value))
+        for name, value in sorted(constructor_kwargs.items()))
+    if not requested:
+        requested = '(driver khong cong khai tham so dia chi I2C)'
+
+    detail = str(exc)
+    extra = ''
+    requested_0x40 = any(
+        '0x40' in _format_i2c_address(value).lower()
+        for value in constructor_kwargs.values())
+    if '0x60' in detail.lower() and requested_0x40:
+        extra = (
+            ' Driver dang import van co truy cap mac dinh 0x60; day thuong la '
+            'sai bien the driver cho JetRacer Pro/Waveshare.')
+
+    return RuntimeError(
+        'Khong khoi tao duoc NvidiaRacecar. module=%s; dia chi cau hinh: %s; '
+        'loi goc: %s.%s Chay `sudo i2cdetect -y -r 1`: mach JetRacer Pro '
+        'phai xuat hien dia chi 40 trong bang. Neu co 0x40 ma van loi, cai dung nhanh '
+        'Waveshare `ws/pro` va khoi dong lai Jupyter kernel.' %
+        (module_path, requested, detail, extra))
+
+
 class BaseDriver(object):
     def set(self, steering, throttle):
         raise NotImplementedError
@@ -115,11 +174,22 @@ class NvidiaJetRacerDriver(BaseDriver):
     """
 
     def __init__(self, steering_gain=None, steering_offset=None,
-                 throttle_gain=None, pulse_width_range=None):
+                 throttle_gain=None, pulse_width_range=None,
+                 i2c_address=None, i2c_address2=None):
         NvidiaRacecar, module_path = _load_nvidia_racecar()
 
-        self.car = NvidiaRacecar()
         print('[driver] NvidiaRacecar: %s' % module_path)
+        constructor_kwargs = _nvidia_constructor_kwargs(
+            NvidiaRacecar, i2c_address=i2c_address,
+            i2c_address2=i2c_address2)
+        if constructor_kwargs:
+            print('[driver] I2C: %s' % ', '.join(
+                '%s=%s' % (name, _format_i2c_address(value))
+                for name, value in sorted(constructor_kwargs.items())))
+        try:
+            self.car = NvidiaRacecar(**constructor_kwargs)
+        except Exception as exc:
+            raise _nvidia_init_error(exc, module_path, constructor_kwargs)
         print('[driver] steering_gain mac dinh cua thu vien: %r' % (
             self.car.steering_gain,))
 
@@ -179,6 +249,8 @@ def build_driver(kind, cfg=None):
             steering_offset=cfg.get('control.driver.steering_offset'),
             throttle_gain=cfg.get('control.driver.throttle_gain'),
             pulse_width_range=cfg.get('control.driver.pulse_width_range'),
+            i2c_address=cfg.get('control.driver.i2c_address'),
+            i2c_address2=cfg.get('control.driver.i2c_address2'),
         )
     if kind == 'ros':
         return RosCmdVelDriver()

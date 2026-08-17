@@ -235,6 +235,7 @@ Lý do phải chọn theo điểm mô phỏng: nhanh hơn 10 giây được **2 
 | Triệu chứng | Nguyên nhân thường gặp |
 |---|---|
 | `No module named 'jetracer.nvidia_racecar'` | Repo NVIDIA chưa nằm trong Python path; kiểm tra `~/jetracer/jetracer/nvidia_racecar.py` hoặc đặt `JETRACER_NVIDIA_ROOT` |
+| `No I2C device at address: 0x60` | JetRacer Pro dùng `0x40`; cập nhật code/config mới nhất, restart kernel, rồi chạy `sudo i2cdetect -y -r 1`. Không thấy `40` thì kiểm tra nguồn/cáp I²C; thấy `40` mà vẫn gọi `60` thì cài đúng nhánh Waveshare `ws/pro` |
 | `Failed to create CaptureSession` / camera 0 frame | Đóng mọi kernel camera, restart `nvargus-daemon`; nếu vẫn lỗi thì tắt nguồn và kiểm tra chiều cáp CSI |
 | FPS tụt dần theo thời gian | Jetson bị throttle nhiệt — kiểm tra `tegrastats`, bật quạt |
 | Xe rẽ ngược hướng | Sai dấu `steering` (bước 4) hoặc sai dấu `cte` (bước 5) |

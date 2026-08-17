@@ -163,6 +163,19 @@ Backend `nvidia` tự tìm NVIDIA JetRacer tại `~/jetracer` và
 `/home/jetson/jetracer`. Nếu repo nằm nơi khác, đặt
 `JETRACER_NVIDIA_ROOT=/duong/dan/toi/jetracer` trước khi chạy Jupyter.
 
+Nếu giao diện báo `No I2C device at address: 0x60`, code sẽ truyền cả hai
+tham số địa chỉ về `0x40` theo cấu hình JetRacer Pro/Waveshare. Tắt kernel
+Jupyter cũ rồi chạy lại notebook. Nếu vẫn lỗi, kiểm tra phần cứng trước:
+
+```bash
+sudo i2cdetect -y -r 1
+```
+
+Kết quả phải có `40`. Nếu không có `40`, đây là lỗi nguồn/cáp/tiếp xúc I²C,
+không phải lỗi tay cầm hay camera. Nếu có `40` nhưng driver vẫn gọi `0x60`,
+image đang cài sai biến thể thư viện; làm theo hướng dẫn Waveshare để chuyển
+repo `jetracer` sang nhánh `ws/pro`, cài lại và khởi động lại kernel.
+
 Chạy thử giao diện bằng video trên laptop, hoàn toàn không điều khiển motor:
 
 ```python
