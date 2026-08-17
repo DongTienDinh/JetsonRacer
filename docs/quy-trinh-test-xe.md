@@ -149,6 +149,23 @@ phải có `Camera OK`, backend (`csi-gstreamer` hoặc `usb-v4l2-index-0`), FPS
 ARM xe. Đóng mọi kernel/notebook camera cũ; chỉ khi camera đã được release mới
 thử `sudo systemctl restart nvargus-daemon`.
 
+Riêng lỗi `gstnvarguscamerasrc ... Failed to create CaptureSession` là lỗi
+Argus chưa tạo được phiên camera, không phải lỗi tay cầm. Làm đúng thứ tự:
+
+```bash
+# Trong Jupyter: Kernel > Shut Down Kernel cho moi notebook da dung camera
+sudo systemctl restart nvargus-daemon
+sleep 2
+cd /home/jetson/JetsonRacer
+python3 tools/check_hardware.py --driver nvidia --camera-seconds 3
+```
+
+Không chạy đồng thời lệnh trên và nút `MỞ CAMERA`. Mã mới dùng capture mode
+`1280x720@30`, retry Argus một lần và khóa liên tiến trình để tránh hai collector
+của project cùng chiếm camera. Nếu backend NVIDIA báo thiếu module nhưng máy đã
+có `/home/jetson/jetracer/jetracer/nvidia_racecar.py`, mã sẽ tự thêm repo đó
+vào Python path. Repo ở vị trí khác thì export `JETRACER_NVIDIA_ROOT`.
+
 Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → xác nhận xe đã kê → `TEST SERVO` →
 `TEST MOTOR 0.5S` → `MỞ CAMERA` → `ARM TAY CẦM` → giữ đúng nút dead-man →
 `BẮT ĐẦU GHI`. Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping
@@ -217,8 +234,8 @@ Lý do phải chọn theo điểm mô phỏng: nhanh hơn 10 giây được **2 
 
 | Triệu chứng | Nguyên nhân thường gặp |
 |---|---|
-| `No module named 'jetracer'` / `rospy` | Sai backend — chạy lại bước 2 |
-| Camera mở được nhưng 0 frame | Cáp CSI cắm ngược, hoặc tiến trình khác đang giữ camera (`sudo systemctl restart nvargus-daemon`) |
+| `No module named 'jetracer.nvidia_racecar'` | Repo NVIDIA chưa nằm trong Python path; kiểm tra `~/jetracer/jetracer/nvidia_racecar.py` hoặc đặt `JETRACER_NVIDIA_ROOT` |
+| `Failed to create CaptureSession` / camera 0 frame | Đóng mọi kernel camera, restart `nvargus-daemon`; nếu vẫn lỗi thì tắt nguồn và kiểm tra chiều cáp CSI |
 | FPS tụt dần theo thời gian | Jetson bị throttle nhiệt — kiểm tra `tegrastats`, bật quạt |
 | Xe rẽ ngược hướng | Sai dấu `steering` (bước 4) hoặc sai dấu `cte` (bước 5) |
 | Xe trôi dần ra mép dù đường thẳng | `steering_offset` chưa hiệu chuẩn |

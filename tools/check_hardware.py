@@ -119,11 +119,17 @@ def check_camera(cfg, seconds, out_dir):
         source.release()
 
     print('       Backend su dung: %s' % getattr(source, 'backend', 'khong ro'))
+    print('       Pipeline CSI: %s' % getattr(source, 'pipeline', 'khong ro'))
     for note in getattr(source, 'startup_notes', []):
         print('       Note: %s' % note)
 
     if read_error is not None:
         print('%s Camera open nhung doc frame bi loi: %s' % (FAIL, read_error))
+        print('       CACH KHOI PHUC Failed to create CaptureSession:')
+        print('       1) Jupyter: Kernel > Shut Down Kernel cho MOI notebook camera cu.')
+        print('       2) Terminal: sudo systemctl restart nvargus-daemon')
+        print('       3) Cho 2 giay, chay lai dung lenh check_hardware nay.')
+        print('       Neu van loi: tat Jetson, rut nguon, cam lai cap CSI dung chieu.')
         return False
 
     if n == 0 or first is None:
@@ -131,6 +137,8 @@ def check_camera(cfg, seconds, out_dir):
         detail = getattr(source, 'last_error', None)
         if detail:
             print('       Chi tiet: %s' % detail)
+        print('       Khoi phuc: dong moi kernel camera ->')
+        print('         sudo systemctl restart nvargus-daemon')
         return False
 
     dt = time.time() - t0
@@ -170,6 +178,11 @@ def check_driver(kind):
     if not report.get(kind, '').startswith('OK'):
         print('')
         print('%s Backend "%s" khong kha dung tren may nay.' % (FAIL, kind))
+        if kind == 'nvidia':
+            print('       Kiem tra file:')
+            print('         ls /home/jetson/jetracer/jetracer/nvidia_racecar.py')
+            print('       Neu repo o noi khac:')
+            print('         export JETRACER_NVIDIA_ROOT=/duong/dan/toi/jetracer')
         return False
     return True
 

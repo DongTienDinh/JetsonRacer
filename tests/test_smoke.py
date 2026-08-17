@@ -26,6 +26,7 @@ from jetracer_baseline.camera import (                          # noqa: E402
     gstreamer_pipeline)
 from jetracer_baseline.config import load_config                 # noqa: E402
 from jetracer_baseline.control.pid import PID                    # noqa: E402
+from jetracer_baseline.control import driver as driver_mod       # noqa: E402
 from jetracer_baseline.perception.lane import LaneDetector       # noqa: E402
 from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
@@ -133,7 +134,8 @@ def test_csi_open_without_frame_falls_back_to_usb():
     try:
         source = CSISource(
             640, 480, 30, allow_usb_fallback=True,
-            startup_attempts=2, startup_delay_s=0.0)
+            startup_attempts=2, startup_delay_s=0.0,
+            csi_open_attempts=1, csi_retry_delay_s=0.0)
         ok, result = source.read()
         assert ok
         assert result.shape == frame.shape
@@ -146,16 +148,106 @@ def test_csi_open_without_frame_falls_back_to_usb():
         camera_mod.cv2.VideoCapture = original
 
 
+def test_csi_open_without_frame_reopens_argus_before_usb():
+    """CaptureSession loi tam thoi: release va mo lai CSI truoc khi fallback."""
+    import jetracer_baseline.camera as camera_mod
+
+    frame = np.full((12, 16, 3), 77, dtype=np.uint8)
+
+    class FakeCapture(object):
+        def __init__(self, reads):
+            self.reads = list(reads)
+            self.released = False
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            if not self.reads:
+                return False, None
+            return self.reads.pop(0)
+
+        def release(self):
+            self.released = True
+
+    first = FakeCapture([(False, None)])
+    second = FakeCapture([(True, frame)])
+    captures = [first, second]
+    original = camera_mod.cv2.VideoCapture
+
+    def fake_video_capture(_source, *_args):
+        return captures.pop(0)
+
+    camera_mod.cv2.VideoCapture = fake_video_capture
+    source = None
+    try:
+        source = CSISource(
+            640, 480, 30, allow_usb_fallback=True,
+            startup_attempts=1, startup_delay_s=0.0,
+            csi_open_attempts=2, csi_retry_delay_s=0.0)
+        ok, result = source.read()
+        assert ok
+        assert result.shape == frame.shape
+        assert source.backend == 'csi-gstreamer'
+        assert first.released
+        assert any('mo lai lan 2/2' in note for note in source.startup_notes)
+        assert not captures
+    finally:
+        if source is not None:
+            source.release()
+        camera_mod.cv2.VideoCapture = original
+
+
 def test_jetson_gstreamer_pipeline_has_low_latency_caps():
-    pipeline = gstreamer_pipeline(640, 480, 30, flip_method=2)
+    pipeline = gstreamer_pipeline(
+        640, 480, 30, flip_method=2,
+        capture_width=1280, capture_height=720, sensor_id=0)
     assert 'nvarguscamerasrc' in pipeline
+    assert 'sensor-id=0' in pipeline
     assert 'memory:NVMM' in pipeline
+    assert 'width=(int)1280, height=(int)720' in pipeline
     assert 'format=(string)NV12' in pipeline
     assert 'nvvidconv flip-method=2' in pipeline
     assert 'format=(string)BGR' in pipeline
     assert 'drop=true' in pipeline
     assert 'max-buffers=1' in pipeline
     assert 'sync=false' in pipeline
+
+
+def test_nvidia_driver_finds_sibling_repo_without_install():
+    """Jetson co ~/jetracer repo nhung chua setup.py install van phai import."""
+    temp_root = tempfile.mkdtemp(prefix='nvidia_jetracer_repo_')
+    package = os.path.join(temp_root, 'jetracer')
+    old_env = os.environ.get('JETRACER_NVIDIA_ROOT')
+    old_path = list(sys.path)
+    old_package = sys.modules.get('jetracer')
+    old_module = sys.modules.get('jetracer.nvidia_racecar')
+    try:
+        os.makedirs(package)
+        with open(os.path.join(package, '__init__.py'), 'w') as fh:
+            fh.write('')
+        with open(os.path.join(package, 'nvidia_racecar.py'), 'w') as fh:
+            fh.write('class NvidiaRacecar(object):\n    pass\n')
+        os.environ['JETRACER_NVIDIA_ROOT'] = temp_root
+        sys.modules.pop('jetracer.nvidia_racecar', None)
+        sys.modules.pop('jetracer', None)
+
+        cls, module_path = driver_mod._load_nvidia_racecar()
+        assert cls.__name__ == 'NvidiaRacecar'
+        assert os.path.abspath(temp_root) in os.path.abspath(module_path)
+    finally:
+        sys.path[:] = old_path
+        sys.modules.pop('jetracer.nvidia_racecar', None)
+        sys.modules.pop('jetracer', None)
+        if old_package is not None:
+            sys.modules['jetracer'] = old_package
+        if old_module is not None:
+            sys.modules['jetracer.nvidia_racecar'] = old_module
+        if old_env is None:
+            os.environ.pop('JETRACER_NVIDIA_ROOT', None)
+        else:
+            os.environ['JETRACER_NVIDIA_ROOT'] = old_env
+        shutil.rmtree(temp_root)
 
 
 def test_latest_grabber_surfaces_background_camera_error():

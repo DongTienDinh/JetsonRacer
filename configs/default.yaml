@@ -6,6 +6,11 @@ camera:
   width: 640
   height: 480
   fps: 30
+  # IMX219 khong co sensor mode 640x480. Argus capture o mode 1280x720,
+  # sau do nvvidconv resize ve width/height phia tren cho pipeline AI.
+  capture_width: 1280
+  capture_height: 720
+  sensor_id: 0
   # CSI camera tren xe qua nvarguscamerasrc. Neu pipeline CSI khong mo hoac
   # mo nhung khong tra frame, thu /dev/video0 mot lan va ghi ro backend tren UI.
   flip_method: 0
@@ -13,6 +18,8 @@ camera:
   usb_index: 0
   startup_attempts: 15
   startup_delay_s: 0.10
+  csi_open_attempts: 2
+  csi_retry_delay_s: 0.50
   # Khoá auto-exposure/white-balance: đổi sáng giữa lúc chạy là rủi ro domain shift lớn nhất.
   lock_exposure: true
 

@@ -6,6 +6,8 @@ Neu dung queue, vong dieu khien se xu ly anh tre -> xe lai theo qua khu.
 """
 
 import glob
+import os
+import tempfile
 import threading
 import time
 
@@ -13,17 +15,70 @@ import cv2
 import numpy as np
 
 
-def gstreamer_pipeline(width, height, fps, flip_method=0):
+try:
+    import fcntl
+except ImportError:  # Windows: chi dung cho smoke-test, khong co camera CSI.
+    fcntl = None
+
+
+CAMERA_LOCK_PATH = os.path.join(tempfile.gettempdir(), 'jetracer_camera.lock')
+
+
+class CameraLease(object):
+    """Khoa lien tien trinh de hai notebook cua project khong mo CSI cung luc."""
+
+    def __init__(self, path=CAMERA_LOCK_PATH):
+        self.path = path
+        self._file = None
+
+    def acquire(self):
+        if fcntl is None:
+            return
+        handle = open(self.path, 'a+')
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (IOError, OSError):
+            handle.seek(0)
+            owner = handle.read().strip() or 'khong ro PID'
+            handle.close()
+            raise IOError(
+                'Camera dang bi mot tien trinh JetsonRacer khac giu (%s). '
+                'Dong kernel/notebook cu truoc khi mo lai.' % owner)
+        handle.seek(0)
+        handle.truncate()
+        handle.write('pid=%d cwd=%s' % (os.getpid(), os.getcwd()))
+        handle.flush()
+        self._file = handle
+
+    def release(self):
+        if self._file is None:
+            return
+        try:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            self._file.close()
+        except Exception:
+            pass
+        self._file = None
+
+
+def gstreamer_pipeline(width, height, fps, flip_method=0,
+                       capture_width=None, capture_height=None, sensor_id=0):
     """Pipeline nvarguscamerasrc cho camera CSI (IMX219) tren Jetson Nano."""
+    capture_width = int(capture_width or width)
+    capture_height = int(capture_height or height)
     return (
-        'nvarguscamerasrc ! '
+        'nvarguscamerasrc sensor-id={sensor_id} ! '
         'video/x-raw(memory:NVMM), width=(int){cw}, height=(int){ch}, '
         'format=(string)NV12, framerate=(fraction){fps}/1 ! '
         'nvvidconv flip-method={flip} ! '
         'video/x-raw, width=(int){w}, height=(int){h}, format=(string)BGRx ! '
         'videoconvert ! video/x-raw, format=(string)BGR ! '
         'appsink drop=true max-buffers=1 sync=false'
-    ).format(cw=width, ch=height, fps=fps, flip=flip_method, w=width, h=height)
+    ).format(sensor_id=int(sensor_id), cw=capture_width, ch=capture_height,
+             fps=fps, flip=flip_method, w=width, h=height)
 
 
 def camera_environment_report():
@@ -125,7 +180,9 @@ class CSISource(FrameSource):
 
     def __init__(self, width, height, fps, flip_method=0,
                  allow_usb_fallback=True, usb_index=0,
-                 startup_attempts=15, startup_delay_s=0.10):
+                 startup_attempts=15, startup_delay_s=0.10,
+                 capture_width=1280, capture_height=720, sensor_id=0,
+                 csi_open_attempts=2, csi_retry_delay_s=0.50):
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
@@ -134,28 +191,67 @@ class CSISource(FrameSource):
         self.usb_index = int(usb_index)
         self.startup_attempts = max(1, int(startup_attempts))
         self.startup_delay_s = max(0.0, float(startup_delay_s))
+        self.capture_width = int(capture_width)
+        self.capture_height = int(capture_height)
+        self.sensor_id = int(sensor_id)
+        self.csi_open_attempts = max(1, int(csi_open_attempts))
+        self.csi_retry_delay_s = max(0.0, float(csi_retry_delay_s))
         self.pipeline = gstreamer_pipeline(
-            self.width, self.height, self.fps, self.flip_method)
+            self.width, self.height, self.fps, self.flip_method,
+            capture_width=self.capture_width,
+            capture_height=self.capture_height,
+            sensor_id=self.sensor_id)
         self.backend = 'csi-gstreamer'
         self.startup_notes = []
         self.last_error = None
         self._needs_warmup = True
+        self.cap = None
+        self._lease = CameraLease()
 
-        self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
-        if not self.cap.isOpened():
-            reason = 'OpenCV khong open duoc pipeline nvarguscamerasrc'
-            self.startup_notes.append(reason)
-            if self.allow_usb_fallback:
-                self._switch_to_usb(reason)
-            else:
+        self._lease.acquire()
+        try:
+            opened = self._open_csi_with_retry()
+            if not opened:
+                reason = 'OpenCV khong open duoc pipeline nvarguscamerasrc'
+                if self.allow_usb_fallback:
+                    self._switch_to_usb(reason)
+                else:
+                    raise IOError(self._failure_message(reason))
+        except Exception:
+            self.release()
+            raise
+
+    def _open_csi_capture(self):
+        if self.cap is not None:
+            try:
                 self.cap.release()
-                raise IOError(self._failure_message(reason))
+            except Exception:
+                pass
+        self.backend = 'csi-gstreamer'
+        self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
+        return self.cap.isOpened()
+
+    def _open_csi_with_retry(self):
+        for attempt in range(1, self.csi_open_attempts + 1):
+            if self._open_csi_capture():
+                return True
+            self.startup_notes.append(
+                'CSI open lan %d/%d that bai' %
+                (attempt, self.csi_open_attempts))
+            if attempt < self.csi_open_attempts and self.csi_retry_delay_s > 0:
+                time.sleep(self.csi_retry_delay_s)
+        return False
 
     def _failure_message(self, reason):
         return (
-            '%s. %s. Kiem tra cap CSI, tien trinh/kernel khac dang giu camera, '
+            '%s. CSI sensor=%d capture=%dx%d@%d -> output=%dx%d. %s. '
+            'Loi `Failed to create CaptureSession` thuong do kernel/tien trinh '
+            'khac dang giu camera, nvargus-daemon bi ket, hoac cap CSI. '
             'va thu `sudo systemctl restart nvargus-daemon` sau khi da dong '
-            'tat ca notebook camera.' % (reason, format_camera_environment()))
+            'tat ca notebook camera.' % (
+                reason, self.sensor_id, self.capture_width,
+                self.capture_height, self.fps, self.width, self.height,
+                format_camera_environment()))
 
     def _switch_to_usb(self, reason):
         try:
@@ -200,6 +296,21 @@ class CSISource(FrameSource):
             ok, frame = self._read_with_warmup()
             if ok:
                 return ok, frame
+            # Argus doi khi bao open=True nhung CaptureSession chua tao duoc.
+            # Release va mo lai CSI mot lan truoc khi chuyen sang USB.
+            if self.backend == 'csi-gstreamer' and self.csi_open_attempts > 1:
+                initial_error = self.last_error
+                for attempt in range(2, self.csi_open_attempts + 1):
+                    self.startup_notes.append(
+                        'CSI co open nhung khong co frame; mo lai lan %d/%d' %
+                        (attempt, self.csi_open_attempts))
+                    if self.csi_retry_delay_s > 0:
+                        time.sleep(self.csi_retry_delay_s)
+                    if self._open_csi_capture():
+                        ok, frame = self._read_with_warmup()
+                        if ok:
+                            return ok, frame
+                self.last_error = initial_error
             if self.backend == 'csi-gstreamer' and self.allow_usb_fallback:
                 self._switch_to_usb(self.last_error)
                 self._needs_warmup = False
@@ -220,8 +331,12 @@ class CSISource(FrameSource):
         return True, frame
 
     def release(self):
-        if self.cap is not None:
-            self.cap.release()
+        try:
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+        finally:
+            self._lease.release()
 
 
 class SyncGrabber(object):
@@ -375,4 +490,9 @@ def build_source(cfg, kind, video_path=None, n_frames=None):
         usb_index=cfg.get('camera.usb_index', 0),
         startup_attempts=cfg.get('camera.startup_attempts', 15),
         startup_delay_s=cfg.get('camera.startup_delay_s', 0.10),
+        capture_width=cfg.get('camera.capture_width', 1280),
+        capture_height=cfg.get('camera.capture_height', 720),
+        sensor_id=cfg.get('camera.sensor_id', 0),
+        csi_open_attempts=cfg.get('camera.csi_open_attempts', 2),
+        csi_retry_delay_s=cfg.get('camera.csi_retry_delay_s', 0.50),
     )

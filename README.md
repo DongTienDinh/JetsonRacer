@@ -144,13 +144,24 @@ Hai bảng `Axes live` và `Buttons đang bấm` luôn cập nhật trước c�
 
 Camera ghi rõ backend thực tế trên giao diện: `csi-gstreamer` hoặc
 `usb-v4l2-index-0`. Trường hợp OpenCV báo camera đã open nhưng frame đầu thất
-bại, code thử lại nhiều lần rồi mới fallback; exception trong thread camera
-được đưa ra log và có thể bấm `MỞ CAMERA` để thử lại. Trước khi restart dịch vụ
-camera, đóng tất cả notebook/kernel đang dùng camera:
+bại, code release và mở lại Argus trước khi fallback; exception trong thread
+camera được đưa ra log và có thể bấm `MỞ CAMERA` để thử lại. Camera capture ở
+mode `1280x720@30`, rồi `nvvidconv` resize về `640x480`; không yêu cầu cảm biến
+CSI phát trực tiếp mode xử lý. Project dùng khóa `/tmp/jetracer_camera.lock` để
+ngăn hai tiến trình của chính project tranh camera.
+
+Nếu log có `Failed to create CaptureSession`, đóng **mọi kernel** từng dùng
+camera (chỉ đóng tab trình duyệt là chưa đủ), rồi chạy:
 
 ```bash
 sudo systemctl restart nvargus-daemon
+sleep 2
+python3 tools/check_hardware.py --driver nvidia --camera-seconds 3
 ```
+
+Backend `nvidia` tự tìm NVIDIA JetRacer tại `~/jetracer` và
+`/home/jetson/jetracer`. Nếu repo nằm nơi khác, đặt
+`JETRACER_NVIDIA_ROOT=/duong/dan/toi/jetracer` trước khi chạy Jupyter.
 
 Chạy thử giao diện bằng video trên laptop, hoàn toàn không điều khiển motor:
 

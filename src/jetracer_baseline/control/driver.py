@@ -19,6 +19,62 @@ Quy uoc chung:
     throttle  in [-1, 1]   (am = lui)
 """
 
+import importlib
+import os
+import sys
+
+
+def _nvidia_repo_candidates():
+    """Vi tri thuong gap cua NVIDIA-AI-IOT/jetracer tren image Jetson."""
+    paths = []
+    configured = os.environ.get('JETRACER_NVIDIA_ROOT', '')
+    if configured:
+        paths.extend([p for p in configured.split(os.pathsep) if p])
+    home = os.path.expanduser('~')
+    paths.extend([
+        os.path.join(home, 'jetracer'),
+        '/home/jetson/jetracer',
+        os.path.join(home, 'jetcard', 'jetracer'),
+        '/opt/jetracer',
+    ])
+    result = []
+    for path in paths:
+        path = os.path.abspath(path)
+        module_path = os.path.join(path, 'jetracer', 'nvidia_racecar.py')
+        if path not in result and os.path.isfile(module_path):
+            result.append(path)
+    return result
+
+
+def _load_nvidia_racecar():
+    """Import NvidiaRacecar, tu them sibling repo vao sys.path neu chua install."""
+    first_error = None
+    try:
+        module = importlib.import_module('jetracer.nvidia_racecar')
+        return module.NvidiaRacecar, getattr(module, '__file__', '?')
+    except Exception as exc:
+        first_error = exc
+
+    tried = []
+    for path in _nvidia_repo_candidates():
+        tried.append(path)
+        if path not in sys.path:
+            sys.path.insert(0, path)
+        # Xoa package import do dang neu Python da tim thay mot package trung ten.
+        sys.modules.pop('jetracer.nvidia_racecar', None)
+        sys.modules.pop('jetracer', None)
+        importlib.invalidate_caches()
+        try:
+            module = importlib.import_module('jetracer.nvidia_racecar')
+            return module.NvidiaRacecar, getattr(module, '__file__', '?')
+        except Exception as exc:
+            first_error = exc
+
+    raise ImportError(
+        'Khong import duoc jetracer.nvidia_racecar: %s. Da tim: %s. '
+        'Neu repo nam noi khac, dat JETRACER_NVIDIA_ROOT=/duong/dan/toi/repo.' %
+        (first_error, ', '.join(tried) if tried else '(khong tim thay repo)'))
+
 
 def _clip(value, low, high):
     if value < low:
@@ -60,9 +116,10 @@ class NvidiaJetRacerDriver(BaseDriver):
 
     def __init__(self, steering_gain=None, steering_offset=None,
                  throttle_gain=None, pulse_width_range=None):
-        from jetracer.nvidia_racecar import NvidiaRacecar  # noqa
+        NvidiaRacecar, module_path = _load_nvidia_racecar()
 
         self.car = NvidiaRacecar()
+        print('[driver] NvidiaRacecar: %s' % module_path)
         print('[driver] steering_gain mac dinh cua thu vien: %r' % (
             self.car.steering_gain,))
 
@@ -132,8 +189,8 @@ def probe():
     """Bao cao backend nao kha dung tren may hien tai."""
     report = {}
     try:
-        import jetracer.nvidia_racecar  # noqa
-        report['nvidia'] = 'OK - thu vien jetracer co san'
+        _cls, module_path = _load_nvidia_racecar()
+        report['nvidia'] = 'OK - thu vien jetracer: %s' % module_path
     except Exception as exc:
         report['nvidia'] = 'KHONG - ' + str(exc)
     try:
