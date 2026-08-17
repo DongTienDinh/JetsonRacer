@@ -1,0 +1,103 @@
+# Profile "safe" — dùng cho LƯỢT 1 của cả hai bài.
+# Mục tiêu duy nhất: về đích, 0 lỗi. Có điểm rồi mới tăng tốc ở lượt 2-3 (configs/fast.yaml).
+# Lý do: 1 lần lệch lane = -13 điểm = 65 giây chạy chậm (xem BASELINE.md §1.2).
+
+camera:
+  width: 640
+  height: 480
+  fps: 30
+  # Khoá auto-exposure/white-balance: đổi sáng giữa lúc chạy là rủi ro domain shift lớn nhất.
+  lock_exposure: true
+
+pipeline:
+  proc_width: 320          # ảnh xử lý được resize xuống cho nhanh
+  proc_height: 240
+  control_hz: 30           # vòng chính -> quyết định điểm FPS (cần >= 20)
+  detect_hz: 10            # luồng detect chạy chậm hơn, kết quả được cache
+  fps_window: 60           # số frame để tính FPS trung bình trượt
+
+lane:
+  # ROI: chỉ lấy phần dưới ảnh (mặt đường ngay trước xe)
+  roi_top: 0.55            # tỉ lệ chiều cao, tính từ trên xuống
+  roi_bottom: 1.0
+  # Bird's-eye warp: 4 điểm nguồn theo tỉ lệ (x, y) của ảnh proc
+  warp_src: [[0.10, 1.00], [0.90, 1.00], [0.62, 0.58], [0.38, 0.58]]
+  warp_dst_margin: 0.25
+  # Lane tối, vạch giữa trắng đứt khúc -> tách bằng ngưỡng sáng thích nghi
+  threshold_block: 31
+  threshold_c: -12
+  min_pixels: 60           # dưới ngưỡng này coi như mất lane
+  smooth_alpha: 0.6        # EMA cho cte, giảm giật
+
+stopline:
+  roi_top: 0.72
+  min_row_fill: 0.45       # % pixel sáng trên 1 hàng để coi là vạch ngang
+  min_rows: 3
+
+control:
+  pid:
+    kp: 0.60
+    ki: 0.00               # baseline không dùng I: dễ windup ở cua gấp
+    kd: 0.10
+    out_limit: 1.0
+  steer_max: 1.0
+  v_max: 0.20              # THẤP có chủ ý. Chốt lại bằng thí nghiệm E3.
+  v_min: 0.10
+  # Giảm tốc khi lệch nhiều hoặc cua gấp: v = v_max - slowdown*|cte|
+  slowdown: 0.12
+  reverse_throttle: -0.15  # dùng khi thoát kẹt
+  driver:
+    # None (để trống / xoá dòng) = không đụng tới thuộc tính đó, giữ mặc định
+    # thư viện jetracer. steering_offset: 0.0 là một lệnh có ý nghĩa ("đặt về
+    # 0"), khác "đừng đụng vào" - xem control.txt của BTC để biết giá trị chốt.
+    steering_gain: -1.0
+    steering_offset: 0.0     # bù lệch cơ khí servo - đo lại trên xe thật
+    throttle_gain:            # để trống: giữ mặc định thư viện, cùng hệ quy chiếu BTC
+    pulse_width_range: [500, 2500]
+
+signs:
+  backend: stub            # stub | yolo   (stub = không cần model, dùng để dev offline)
+  model_path: models/signs.engine
+  input_size: 320
+  conf_threshold: 0.55
+  # Đèn xanh phải chắc chắn hơn hẳn: báo nhầm xanh = vượt đèn đỏ = HỦY LƯỢT
+  conf_green: 0.80
+  conf_red: 0.35           # thấp có chủ ý: thà dừng thừa còn hơn bỏ sót đỏ
+  vote_k: 3                # cần k/n frame đồng thuận mới latch nhãn
+  vote_n: 5
+  # bbox chiếm >= tỉ lệ này của khung -> đủ gần để khoá quyết định
+  lock_area_ratio: 0.020
+  classes:
+    - turn_left
+    - turn_right
+    - go_straight
+    - no_left
+    - no_right
+    - no_straight
+    - red_light
+    - green_light
+    - obstacle
+
+fsm:
+  turn_duration_s: 1.6     # thời gian giữ lệnh rẽ trước khi trả về bám lane
+  turn_steer: 0.75
+  stopline_trigger: 0.35   # distance <= ngưỡng này = "đã tới vạch"
+  stop_hold_s: 0.3         # giữ dừng tối thiểu trước vạch khi đèn đỏ
+  # Biển CẤM: ĐB §4.3 nói tại ngã tư đó "chỉ có hai hướng", nhưng không nói
+  # hai hướng nào. Chưa khảo sát được sa bàn thật -> để cấu hình, CHỐT LẠI
+  # sau buổi khảo sát sa bàn. Đây là giả định, không phải sự thật đã kiểm chứng.
+  prohibit_fallback:
+    no_left: straight
+    no_right: straight
+    no_straight: right
+  # Phát hiện kẹt bằng chênh lệch ảnh liên tiếp (JetRacer không chắc có encoder).
+  # PHẢI HIỆU CHUẨN TRÊN XE THẬT: cho xe đứng yên đo giá trị nhiễu nền, rồi cho
+  # xe chạy chậm nhất đo giá trị thật; đặt ngưỡng vào giữa. Đặt sai -> hoặc báo
+  # kẹt nhầm liên tục, hoặc không bao giờ phát hiện được kẹt.
+  motion_threshold: 2.0
+  stuck_timeout_s: 3.0     # tự thoát kẹt TRƯỚC mốc 10 s phải xin restart (ĐB §6)
+  unstuck_duration_s: 0.8
+
+logging:
+  dir: logs
+  flush_every: 30          # ghi xuống đĩa mỗi N dòng (mất điện đột ngột vẫn còn log)

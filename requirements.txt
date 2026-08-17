@@ -1,0 +1,24 @@
+# === Bat buoc (laptop + xe) ===
+# Tren Jetson Nano (JetPack 4.6): OpenCV va numpy DA CO SAN trong image, KHONG
+# pip install de lai - se pha ban OpenCV co CUDA/GStreamer cua NVIDIA.
+# Tren Jetson chi can:  pip3 install PyYAML
+numpy>=1.16
+opencv-python>=4.1
+PyYAML>=5.1
+
+# === Giao dien thu du lieu lai xe trong Jupyter (thuong da co san tren xe) ===
+# Neu lenh `import ipywidgets` bao loi, cai trong venv --system-site-packages:
+# ipywidgets>=7.5,<8
+# traitlets>=4.3
+
+# === Phan tich log / bieu do cho paper (chi can tren laptop) ===
+matplotlib>=3.0
+
+# === Huan luyen bien bao (chi tren may train, KHONG cai tren Jetson) ===
+# ultralytics>=8.0
+# torch
+#
+# Tren Jetson: dung TensorRT engine da export tu may train.
+# Export:  yolo export model=best.pt format=engine half=True imgsz=320 device=0
+# LUU Y: engine TensorRT phu thuoc phien ban - phai export TREN CHINH Jetson se
+# chay, khong copy engine tu may khac sang.

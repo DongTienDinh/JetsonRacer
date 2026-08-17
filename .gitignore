@@ -1,0 +1,68 @@
+# Python cache, test va build artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Cau hinh cong cu AI cuc bo - khong thuoc san pham cua doi
+.claude/
+
+# Log chay va bao cao sinh ra - KHONG commit, nhung PHAI luu tru rieng:
+# The le muc 9.1 cho BTC quyen doi log de xac minh, va moi con so trong paper
+# phai truy nguoc duoc ve mot file log cu the.
+logs/
+reports/
+outputs/
+runs/
+artifacts/
+wandb/
+*.log
+
+# Du lieu va model (dung LFS hoac luu ngoai repo)
+data/
+datasets/
+models/
+weights/
+checkpoints/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.pt
+*.pth
+*.ckpt
+*.engine
+*.plan
+*.onnx
+*.tflite
+*.torchscript
+
+# Moi truong ao, bien moi truong va IDE
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# File tam cua he dieu han/cong cu
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.temp
+*.swp
+*~

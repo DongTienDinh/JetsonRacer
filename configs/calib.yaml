@@ -1,0 +1,16 @@
+# Profile "calib" — dùng cho buổi HIỆU CHUẨN trên sa bàn (bước 4-6 của
+# docs/quy-trinh-test-xe.md). Mục tiêu: xe bò thật chậm, an toàn khi tự kiểm
+# tra bằng mắt (dấu steering/throttle, steering_offset, roi/warp lane).
+# Chỉ ghi đè phần khác với default.yaml; nạp bằng:
+#   --config configs/default.yaml --override configs/calib.yaml
+#
+# `--record` và `--max-seconds` KHÔNG phải config key (là cờ dòng lệnh), nhớ
+# thêm tay khi chạy buổi hiệu chuẩn, ví dụ:
+#   python3 -m src.jetracer_baseline.cli run --task speed --driver nvidia \
+#     --config configs/default.yaml --override configs/calib.yaml \
+#     --max-seconds 30 --record --log-dir logs/calib
+
+control:
+  v_max: 0.12               # rất thấp có chủ ý - đủ để quan sát, không đủ để nguy hiểm
+  v_min: 0.10
+  slowdown: 0.05            # ít giảm tốc thêm - v_max đã thấp sẵn

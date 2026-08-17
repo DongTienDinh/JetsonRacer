@@ -1,0 +1,21 @@
+# Profile "fast" — chỉ dùng cho LƯỢT 2-3 Speed Track, SAU KHI lượt 1 đã có điểm.
+# Chỉ ghi đè phần khác với default.yaml; nạp bằng:
+#   cli ... --config configs/default.yaml --override configs/fast.yaml
+#
+# KHÔNG dùng profile này cho Smart City: ở đó thời gian chỉ đáng 0.1 điểm/giây
+# trong khi đọc sai 1 biển mất ~10 điểm (BASELINE.md §1.3).
+
+control:
+  v_max: 0.32              # giá trị thật phải lấy từ thí nghiệm E3, không đoán
+  v_min: 0.14
+  slowdown: 0.18           # phanh mạnh hơn ở cua vì vào cua nhanh hơn
+  pid:
+    kp: 0.72
+    ki: 0.00
+    kd: 0.16               # tăng D để bù dao động ở tốc độ cao
+
+lane:
+  smooth_alpha: 0.5        # bám nhanh hơn, chấp nhận nhiễu hơn
+
+pipeline:
+  detect_hz: 8             # Speed Track ít phụ thuộc detector -> nhường CPU cho vòng chính
