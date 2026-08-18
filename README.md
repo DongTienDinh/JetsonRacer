@@ -62,8 +62,13 @@ python3 tools/check_hardware.py --driver nvidia
 Test servo và động cơ — **kê xe lên giá, bánh không chạm đất**:
 
 ```bash
-python3 tools/check_hardware.py --driver nvidia --actuator --wheels-are-lifted
+# Lần đầu chỉ test servo, không cộng thêm tải motor
+python3 tools/check_hardware.py --driver nvidia --actuator \
+  --wheels-are-lifted --steering-only
 ```
+
+Preflight sẽ từ chối test actuator nếu Jetson không ở power mode 5W. Thiết lập
+bằng `sudo nvpmodel -m 1`, rồi xác nhận lại với `nvpmodel -q`.
 
 Tune ngưỡng bám lane trên sa bàn thật (xuất ảnh 4 ô từng bước xử lý):
 
@@ -135,13 +140,14 @@ MỞ CAMERA → đặt xe xuống đất → ARM TAY CẦM → BẮT ĐẦU GHI`
 Checkbox `BÁNH XE ĐÃ KÊ KHỎI MẶT ĐẤT` chỉ khóa hai nút test actuator, không
 khóa ARM lái thật. Dead-man mặc định tắt. Ga tay mặc định bắt đầu ở `0.12` sau
 deadzone và tăng tới `0.30`; hiệu chuẩn `Ga khởi động` tới mức nhỏ nhất làm bánh
-vừa quay khi xe đang kê. Lái tay dùng expo `0.35`, giới hạn `0.85` và slew-rate
-`2.5 đơn vị/s`; driver dùng gain `-0.65`, PWM `750–2250 µs` để không ép servo
-tới chặn cơ khí. Mỗi session được lưu riêng tại
+vừa quay khi xe đang kê. Profile low-power dùng expo `0.45`, giới hạn lệnh `0.60`
+và slew-rate `1.5 đơn vị/s`. Quan trọng hơn, driver chặn cứng output servo ở
+`[-0.40, +0.40]`; với PWM `750–2250 µs`, xung thực tế không vượt khoảng
+`1200–1800 µs` dù lệnh đến từ UI, PID hay FSM. Mỗi session được lưu riêng tại
 `data/driving/<session_timestamp>/` gồm
 ảnh gốc, `labels.csv`, `drive.avi`, `drive.sidecar.csv` và `metadata.json`.
 Video được ghi ở thread riêng nên không chặn vòng điều khiển; sidecar nối từng
-frame video với `frame_id`, thời gian và lệnh lái/ga. Mặc định video ghi 20 FPS
+frame video với `frame_id`, thời gian và lệnh lái/ga. Mặc định video ghi 15 FPS
 để giảm tải Jetson, còn `Lưu FPS` chỉ điều khiển tần suất ảnh JPEG/nhãn. Với dataset segmentation bài 1, để
 `Lưu FPS = 5`; nếu sau này train imitation learning thì tăng lên 15–20 FPS.
 
@@ -185,6 +191,16 @@ sudo i2cdetect -y -r 1
 
 Kết quả phải có `40`. Nếu không có `40`, đây là lỗi nguồn/cáp/tiếp xúc I²C,
 không phải lỗi tay cầm hay camera.
+
+Nếu bẻ lái làm mất giao diện hoặc xe tắt, mở một Terminal riêng trước khi thử:
+
+```bash
+python3 tools/diagnose_shutdown.py monitor
+```
+
+Sau sự cố hoặc sau khi dừng monitor, chạy `python3 tools/diagnose_shutdown.py check`.
+`REBOOT CONFIRMED` nghĩa là boot ID đã đổi: ưu tiên xử lý pin, rail 5 V, servo
+kẹt/chạm chặn cơ khí và power mode; đó không phải exception của notebook.
 
 Chạy thử giao diện bằng video trên laptop, hoàn toàn không điều khiển motor:
 

@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """Bring-up xe theo tung buoc, tu an toan den rui ro.
 
-    python3 tools/check_hardware.py                  # buoc 1-4, KHONG chay motor
+    python3 tools/check_hardware.py                  # buoc 1-5, KHONG chay motor
     python3 tools/check_hardware.py --driver nvidia --actuator --wheels-are-lifted
 
-Thu tu cac buoc co chu dich: moi buoc chi chay khi buoc truoc da qua. Buoc 5
+Thu tu cac buoc co chu dich: moi buoc chi chay khi buoc truoc da qua. Buoc 6
 (dong co) bi khoa sau co --wheels-are-lifted vi xe co the lao di.
 
-!! TRUOC KHI CHAY BUOC 5: KE XE LEN GIA, BANH KHONG CHAM DAT !!
+!! TRUOC KHI CHAY BUOC 6: KE XE LEN GIA, BANH KHONG CHAM DAT !!
 """
 
 from __future__ import print_function
@@ -15,6 +15,7 @@ from __future__ import print_function
 import argparse
 import os
 import platform
+import subprocess
 import sys
 import time
 
@@ -70,8 +71,51 @@ def check_python():
     return ok
 
 
+def _is_5w_mode(output):
+    """Nhan dang output cua cac phien ban nvpmodel tren JetPack 4.x."""
+    text = str(output).lower()
+    if '5w' in text:
+        return True
+    if 'mode_id: 1' in text or 'mode id: 1' in text:
+        return True
+    return any(line.strip() == '1' for line in text.splitlines())
+
+
+def check_power_mode():
+    step(2, 'Nguon Jetson / nvpmodel')
+    if platform.system().lower() != 'linux':
+        print('%s Khong phai Linux/Jetson - bo qua power mode.' % WARN)
+        return None
+    try:
+        output = subprocess.check_output(
+            ['nvpmodel', '-q'], stderr=subprocess.STDOUT)
+        if not isinstance(output, str):
+            output = output.decode('utf-8', 'replace')
+    except OSError:
+        print('%s Khong tim thay nvpmodel; neu day khong phai Jetson thi bo qua.' %
+              WARN)
+        return None
+    except subprocess.CalledProcessError as exc:
+        detail = exc.output.decode('utf-8', 'replace') \
+            if not isinstance(exc.output, str) else exc.output
+        print('%s Khong doc duoc power mode: %s' % (FAIL, detail.strip()))
+        return False
+
+    print('       nvpmodel -q: %s' % ' | '.join(
+        line.strip() for line in output.splitlines() if line.strip()))
+    if _is_5w_mode(output):
+        print('%s Jetson dang o che do 5W.' % PASS)
+        return True
+
+    print('%s Jetson chua o 5W. Khong test servo khi camera/video dang tai CPU.' %
+          FAIL)
+    print('       Chay: sudo nvpmodel -m 1')
+    print('       Sau do kiem tra lai: nvpmodel -q')
+    return False
+
+
 def check_config():
-    step(2, 'Config')
+    step(3, 'Config')
     from jetracer_baseline.config import load_config
     path = os.path.join(ROOT, 'configs', 'default.yaml')
     try:
@@ -87,7 +131,7 @@ def check_config():
 
 
 def check_camera(cfg, seconds, out_dir):
-    step(3, 'Camera')
+    step(4, 'Camera')
     import cv2
     from jetracer_baseline.camera import build_source, format_camera_environment
 
@@ -161,7 +205,7 @@ def check_camera(cfg, seconds, out_dir):
 
 
 def check_driver(kind, cfg):
-    step(4, 'Backend dieu khien')
+    step(5, 'Backend dieu khien')
     from jetracer_baseline.control import driver as driver_mod
 
     report = driver_mod.probe()
@@ -207,8 +251,16 @@ def check_driver(kind, cfg):
     return True
 
 
-def check_actuator(kind, lifted, cfg):
-    step(5, 'Servo lai + dong co  [RUI RO]')
+def _hold_command(driver, steering, throttle, seconds):
+    """Lam moi lenh de watchdog khong tu dua lai ve giua trong bai test."""
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while time.monotonic() < deadline:
+        driver.set(steering, throttle)
+        time.sleep(0.05)
+
+
+def check_actuator(kind, lifted, cfg, steering_only=False):
+    step(6, 'Servo lai + dong co  [RUI RO]')
 
     if not lifted:
         print('%s Bo qua. Buoc nay lam banh xe QUAY.' % WARN)
@@ -225,19 +277,24 @@ def check_actuator(kind, lifted, cfg):
         return False
 
     try:
-        print('  Quet goc lai (dong co KHONG chay)...')
-        for label, value in (('giua ', 0.0), ('TRAI ', -0.6), ('giua ', 0.0),
-                             ('PHAI ', 0.6), ('giua ', 0.0)):
-            drv.set(value, 0.0)
+        # 0.35 * gain 0.65 = output 0.2275, tuong duong khoang
+        # 1329-1671 us voi pulse range 750-2250. Day la buoc quan sat co khi,
+        # khong phai bai tim goc lai cuc dai.
+        print('  Quet goc lai LOW-POWER (dong co KHONG chay)...')
+        for label, value in (('giua ', 0.0), ('TRAI ', -0.35), ('giua ', 0.0),
+                             ('PHAI ', 0.35), ('giua ', 0.0)):
             print('    steering = %+.2f  (%s)  <- nhin banh truoc' % (value, label))
-            time.sleep(1.2)
+            _hold_command(drv, value, 0.0, 0.50)
 
-        print('')
-        print('  Xung ga rat ngan (0.15 trong 0.6 s)...')
-        drv.set(0.0, 0.15)
-        time.sleep(0.6)
-        drv.stop()
-        print('    xong, da ve 0')
+        if steering_only:
+            print('')
+            print('  Da bo qua motor theo --steering-only.')
+        else:
+            print('')
+            print('  Xung ga rat ngan (0.15 trong 0.6 s)...')
+            _hold_command(drv, 0.0, 0.15, 0.60)
+            drv.stop()
+            print('    xong, da ve 0')
     except Exception as exc:
         print('%s Loi khi dieu khien: %s' % (FAIL, exc))
         return False
@@ -268,6 +325,8 @@ def main(argv=None):
                         help='Chay buoc 5 (servo + dong co)')
     parser.add_argument('--wheels-are-lifted', action='store_true',
                         help='Xac nhan banh xe KHONG cham dat')
+    parser.add_argument('--steering-only', action='store_true',
+                        help='Chi test servo lai, khong quay motor')
     args = parser.parse_args(argv)
 
     print('=' * 66)
@@ -279,6 +338,8 @@ def main(argv=None):
     if not results['python']:
         print('\nDung lai: thieu thu vien co ban.')
         return 1
+
+    results['power'] = check_power_mode()
 
     cfg = check_config()
     results['config'] = cfg is not None
@@ -294,7 +355,13 @@ def main(argv=None):
     results['driver'] = check_driver(args.driver, cfg)
 
     if args.actuator:
-        results['actuator'] = check_actuator(args.driver, args.wheels_are_lifted, cfg)
+        if results['power'] is False:
+            print('\n%s Bo qua actuator vi Jetson chua o power mode 5W.' % FAIL)
+            results['actuator'] = False
+        else:
+            results['actuator'] = check_actuator(
+                args.driver, args.wheels_are_lifted, cfg,
+                steering_only=args.steering_only)
     else:
         results['actuator'] = None
 
@@ -302,7 +369,7 @@ def main(argv=None):
     print('=' * 66)
     print('TOM TAT')
     print('=' * 66)
-    for name in ('python', 'config', 'camera', 'driver', 'actuator'):
+    for name in ('python', 'power', 'config', 'camera', 'driver', 'actuator'):
         value = results.get(name)
         mark = 'chua chay' if value is None else ('OK' if value else 'LOI')
         print('  %-9s : %s' % (name, mark))

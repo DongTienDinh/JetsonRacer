@@ -59,11 +59,15 @@ def test_config_loads():
     assert cfg.get('control.driver.pwm_frequency') is None
     assert abs(cfg.get('control.driver.steering_gain')) <= 0.65
     assert cfg.get('control.driver.pulse_width_range') == [750, 2250]
+    assert cfg.get('control.driver.steering_output_min') == -0.40
+    assert cfg.get('control.driver.steering_output_max') == 0.40
     assert 0 < cfg.get('manual.min_throttle') < cfg.get('manual.max_throttle')
     assert cfg.get('manual.test_throttle') >= cfg.get('manual.min_throttle')
-    assert 0 < cfg.get('manual.max_steering') <= 0.85
+    assert 0 < cfg.get('manual.max_steering') <= 0.60
     assert cfg.get('manual.steering_slew_rate') > 0
     assert 10 <= cfg.get('manual.video_fps') <= cfg.get('camera.fps')
+    assert cfg.get('control.steer_max') <= 0.60
+    assert cfg.get('fsm.turn_steer') <= cfg.get('control.steer_max')
     # Doc override phai ghi de dung, khong lam mat khoa khac
     cfg2 = load_config(CONFIG, [os.path.join(ROOT, 'configs', 'fast.yaml')])
     assert cfg2.get('control.v_max') > cfg.get('control.v_max')
@@ -381,7 +385,8 @@ def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
             steering_channel=0, throttle_channel=1,
             steering_gain=-0.65, steering_offset=0.0,
             throttle_gain=0.8, pulse_width_range=(750, 2250),
-            command_timeout_s=0.12)
+            command_timeout_s=0.12,
+            steering_output_min=-0.40, steering_output_max=0.40)
 
         kit = FakeServoKit.instances[-1]
         steering = kit.continuous_servo[0]
@@ -393,6 +398,9 @@ def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
         drv.set(0.50, 0.25)
         assert abs(steering.throttle - (-0.325)) < 1e-9
         assert abs(throttle.throttle - 0.20) < 1e-9
+        drv.set(1.0, 0.0)
+        assert abs(steering.throttle - (-0.40)) < 1e-9
+        assert abs(drv.last_steering_output - (-0.40)) < 1e-9
         drv.stop()
         assert throttle.throttle == 0.0
 
@@ -431,6 +439,16 @@ def test_hardware_preflight_initializes_driver_not_only_imports():
     finally:
         driver_mod.probe = original_probe
         driver_mod.build_driver = original_build
+
+
+def test_power_mode_parser_and_shutdown_probe_helpers():
+    from tools import check_hardware, diagnose_shutdown
+
+    assert check_hardware._is_5w_mode('NV Power Mode: 5W\n1\n')
+    assert check_hardware._is_5w_mode('MODE_ID: 1\n')
+    assert not check_hardware._is_5w_mode('NV Power Mode: MAXN\n0\n')
+    assert isinstance(diagnose_shutdown._uptime_s(), float)
+    assert diagnose_shutdown._uptime_s() >= 0.0
 
 
 def test_latest_grabber_surfaces_background_camera_error():
@@ -565,7 +583,7 @@ def test_manual_collector_preview_control_and_recording():
         collector.controller.axes[2].value = 0.50
         collector.controller.axes[1].value = -1.00
         time.sleep(0.15)
-        assert 0.20 < collector._steering_cmd < 0.35
+        assert 0.15 < collector._steering_cmd < 0.22
         assert collector._throttle_cmd > 0.15
         assert collector._deadman_pressed
 

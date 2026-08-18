@@ -195,7 +195,8 @@ class NvidiaJetRacerDriver(BaseDriver):
                  i2c_address=None, i2c_address2=None,
                  implementation='library', pwm_frequency=None,
                  steering_channel=0, throttle_channel=1,
-                 command_timeout_s=0.8):
+                 command_timeout_s=0.8, steering_output_min=None,
+                 steering_output_max=None):
         self.implementation = implementation or 'library'
         self._io_lock = threading.RLock()
         self._watchdog_stop = threading.Event()
@@ -203,6 +204,18 @@ class NvidiaJetRacerDriver(BaseDriver):
         self._last_command_time = None
         self._closed = False
         self.command_timeout_s = max(0.0, float(command_timeout_s or 0.0))
+        self.steering_output_min = -1.0 if steering_output_min is None \
+            else float(steering_output_min)
+        self.steering_output_max = 1.0 if steering_output_max is None \
+            else float(steering_output_max)
+        if self.steering_output_min < -1.0 or \
+                self.steering_output_max > 1.0 or \
+                self.steering_output_min > self.steering_output_max:
+            raise ValueError(
+                'Gioi han output servo khong hop le: min=%s max=%s' %
+                (self.steering_output_min, self.steering_output_max))
+        self.last_steering_output = 0.0
+        self.last_throttle_output = 0.0
 
         if self.implementation == 'waveshare_single_pca':
             self._init_waveshare_single_pca(
@@ -266,6 +279,11 @@ class NvidiaJetRacerDriver(BaseDriver):
             self.car.steering_offset = steering_offset
         if throttle_gain is not None:
             self.car.throttle_gain = throttle_gain
+        self.steering_gain = float(self.car.steering_gain)
+        self.steering_offset = float(self.car.steering_offset)
+        self.throttle_gain = float(self.car.throttle_gain)
+        print('[driver] hard steering output limit: %.3f .. %.3f' % (
+            self.steering_output_min, self.steering_output_max))
 
     def _init_waveshare_single_pca(self, steering_gain, steering_offset,
                                    throttle_gain, pulse_width_range,
@@ -299,6 +317,8 @@ class NvidiaJetRacerDriver(BaseDriver):
             self.steering_motor.set_pulse_width_range(*pulse_width_range)
             print('[driver] set_pulse_width_range%r : OK' %
                   (tuple(pulse_width_range),))
+        print('[driver] hard steering output limit: %.3f .. %.3f' % (
+            self.steering_output_min, self.steering_output_max))
 
         # Ghi neutral ngay sau khoi tao, truoc khi bat dau watchdog/UI.
         with self._io_lock:
@@ -313,23 +333,31 @@ class NvidiaJetRacerDriver(BaseDriver):
             throttle_error = exc
         try:
             self.steering_motor.throttle = _clip(
-                self.steering_offset, -1.0, 1.0)
+                self.steering_offset, self.steering_output_min,
+                self.steering_output_max)
         except Exception:
             if throttle_error is None:
                 raise
+        else:
+            self.last_steering_output = _clip(
+                self.steering_offset, self.steering_output_min,
+                self.steering_output_max)
+            self.last_throttle_output = 0.0
         if throttle_error is not None:
             raise throttle_error
 
     def _set_direct_locked(self, steering, throttle):
         steering_output = _clip(
             float(steering) * self.steering_gain + self.steering_offset,
-            -1.0, 1.0)
+            self.steering_output_min, self.steering_output_max)
         throttle_output = _clip(
             float(throttle) * self.throttle_gain, -1.0, 1.0)
         try:
             # Chi cap ga sau khi lenh lai hop le da duoc ghi.
             self.steering_motor.throttle = steering_output
             self.throttle_motor.throttle = throttle_output
+            self.last_steering_output = steering_output
+            self.last_throttle_output = throttle_output
         except Exception:
             # Bat ky loi nao cung phai thu cat ga truoc khi day exception len UI.
             try:
@@ -346,6 +374,21 @@ class NvidiaJetRacerDriver(BaseDriver):
             # steering loi lam bo qua lenh cat ga.
             self.car.throttle = 0.0
             self.car.steering = 0.0
+            self.last_throttle_output = 0.0
+            self.last_steering_output = _clip(
+                self.steering_offset, self.steering_output_min,
+                self.steering_output_max)
+
+    def _limit_library_steering(self, steering):
+        """Gioi han output servo cua NvidiaRacecar ma van giu API steering."""
+        if abs(self.steering_gain) < 1e-12:
+            return float(steering)
+        output = _clip(
+            float(steering) * self.steering_gain + self.steering_offset,
+            self.steering_output_min, self.steering_output_max)
+        return _clip(
+            (output - self.steering_offset) / self.steering_gain,
+            -1.0, 1.0)
 
     def _watchdog_loop(self):
         interval = min(0.10, max(0.02, self.command_timeout_s / 4.0))
@@ -381,8 +424,14 @@ class NvidiaJetRacerDriver(BaseDriver):
             if self.implementation == 'waveshare_single_pca':
                 self._set_direct_locked(steering, throttle)
             else:
+                steering = self._limit_library_steering(steering)
                 self.car.steering = steering
                 self.car.throttle = throttle
+                self.last_steering_output = _clip(
+                    steering * self.steering_gain + self.steering_offset,
+                    self.steering_output_min, self.steering_output_max)
+                self.last_throttle_output = _clip(
+                    throttle * self.throttle_gain, -1.0, 1.0)
             self._last_command_time = time.monotonic()
 
     def stop(self):
@@ -455,6 +504,10 @@ def build_driver(kind, cfg=None):
             throttle_channel=cfg.get('control.driver.throttle_channel', 1),
             command_timeout_s=cfg.get(
                 'control.driver.command_timeout_s', 0.8),
+            steering_output_min=cfg.get(
+                'control.driver.steering_output_min'),
+            steering_output_max=cfg.get(
+                'control.driver.steering_output_max'),
         )
     if kind == 'ros':
         return RosCmdVelDriver()

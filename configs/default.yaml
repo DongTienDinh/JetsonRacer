@@ -35,17 +35,20 @@ pipeline:
 # ke: tang min_throttle dan den khi banh vua quay, khong tang tuy tien.
 manual:
   # Gioi han + expo + slew rate giu servo khong nhay toi chan co khi gat can.
-  max_steering: 0.85
-  steering_expo: 0.35
-  steering_slew_rate: 2.5  # don vi lenh / giay; 0 -> khong gioi han
+  # Profile LOW-POWER: full stick chi gui 0.60, sau do driver con chan output
+  # servo o +/-0.40. Khi nguon + co khi da qua bai test moi tang tung 0.05.
+  max_steering: 0.60
+  steering_expo: 0.45
+  steering_slew_rate: 1.5  # don vi lenh / giay; 0 -> khong gioi han
   min_throttle: 0.12
   max_throttle: 0.30
   throttle_rise_rate: 1.2
   throttle_fall_rate: 4.0  # nha ga nhanh hon tang ga
   test_throttle: 0.25
   record_video: true
-  video_fps: 20
-  video_queue_size: 60
+  # MJPG dung CPU; 15 FPS giam tai Jetson nhung van du de doi chieu lai xe.
+  video_fps: 15
+  video_queue_size: 30
 
 lane:
   # ROI: chỉ lấy phần dưới ảnh (mặt đường ngay trước xe)
@@ -71,7 +74,7 @@ control:
     ki: 0.00               # baseline không dùng I: dễ windup ở cua gấp
     kd: 0.10
     out_limit: 1.0
-  steer_max: 0.85
+  steer_max: 0.60
   v_max: 0.20              # THẤP có chủ ý. Chốt lại bằng thí nghiệm E3.
   v_min: 0.10
   # Giảm tốc khi lệch nhiều hoặc cua gấp: v = v_max - slowdown*|cte|
@@ -89,10 +92,13 @@ control:
     throttle_channel: 1
     # Vong UI gui 30 Hz. Neu mat lenh qua 0.8 s, watchdog tu ghi throttle=0.
     command_timeout_s: 0.8
-    # Mac dinh ServoKit la 750-2250 us. Ket hop gain 0.65 cho bien an toan
-    # khoang 1013-1988 us ngay ca khi lenh lai dat +/-1.
+    # Hai gioi han duoi nam NGAY TRUOC lenh PCA9685, nen UI/PID/FSM deu khong
+    # the vuot qua. Voi range 750-2250 us, +/-0.40 tuong duong 1200-1800 us.
+    # Day la profile tam thoi cho den khi do duoc bien trai/phai cua tung xe.
     steering_gain: -0.65
     steering_offset: 0.0     # bù lệch cơ khí servo - đo lại trên xe thật
+    steering_output_min: -0.40
+    steering_output_max: 0.40
     throttle_gain: 0.8
     pulse_width_range: [750, 2250]
 
@@ -121,7 +127,7 @@ signs:
 
 fsm:
   turn_duration_s: 1.6     # thời gian giữ lệnh rẽ trước khi trả về bám lane
-  turn_steer: 0.75
+  turn_steer: 0.55
   stopline_trigger: 0.35   # distance <= ngưỡng này = "đã tới vạch"
   stop_hold_s: 0.3         # giữ dừng tối thiểu trước vạch khi đèn đỏ
   # Biển CẤM: ĐB §4.3 nói tại ngã tư đó "chỉ có hai hướng", nhưng không nói

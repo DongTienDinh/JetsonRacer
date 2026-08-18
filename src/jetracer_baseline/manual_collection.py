@@ -274,11 +274,11 @@ class ManualDriveCollector(object):
             value=0.06, min=0.0, max=0.25, step=0.01,
             description='Deadzone:', readout_format='.2f')
         self.max_steering = widgets.FloatSlider(
-            value=float(self.cfg.get('manual.max_steering', 0.85)),
+            value=float(self.cfg.get('manual.max_steering', 0.60)),
             min=0.20, max=1.00, step=0.05,
             description='Lai toi da:', readout_format='.2f')
         self.steering_expo = widgets.FloatSlider(
-            value=float(self.cfg.get('manual.steering_expo', 0.35)),
+            value=float(self.cfg.get('manual.steering_expo', 0.45)),
             min=0.0, max=0.80, step=0.05,
             description='Do mem lai:', readout_format='.2f')
         self.min_throttle = widgets.FloatSlider(
@@ -407,12 +407,28 @@ class ManualDriveCollector(object):
         color = '#087f23' if driver is not None and self.driver_kind == 'nvidia' \
             else '#b26a00'
         implementation = getattr(driver, 'implementation', '-')
-        gain = getattr(driver, 'throttle_gain', None)
-        gain_text = '-' if gain is None else '%.2f' % float(gain)
+        throttle_gain = getattr(driver, 'throttle_gain', None)
+        throttle_gain_text = '-' if throttle_gain is None else '%.2f' % float(
+            throttle_gain)
+        steering_gain = getattr(driver, 'steering_gain', None)
+        steering_gain_text = '-' if steering_gain is None else '%.2f' % float(
+            steering_gain)
+        output_min = getattr(driver, 'steering_output_min', None)
+        output_max = getattr(driver, 'steering_output_max', None)
+        if output_min is None or output_max is None:
+            limit_text = '-'
+        else:
+            limit_text = '%+.2f..%+.2f' % (float(output_min), float(output_max))
+        servo_output = getattr(driver, 'last_steering_output', None)
+        servo_output_text = '-' if servo_output is None else '%+.3f' % float(
+            servo_output)
         return (
             '<b>Driver:</b> backend=<span style="color:%s">%s</span> &nbsp; '
-            'object=%s &nbsp; implementation=%s &nbsp; throttle_gain=%s' % (
-                color, self.driver_kind, driver_name, implementation, gain_text))
+            'object=%s &nbsp; implementation=%s &nbsp; steer_gain=%s &nbsp; '
+            'hard_limit=%s &nbsp; servo_out=%s &nbsp; throttle_gain=%s' % (
+                color, self.driver_kind, driver_name, implementation,
+                steering_gain_text, limit_text, servo_output_text,
+                throttle_gain_text))
 
     def _controller_html(self):
         connected = bool(getattr(self.controller, 'connected', False))
@@ -514,7 +530,7 @@ class ManualDriveCollector(object):
                 dt = _clip(now - self._last_control_time, 0.001, 0.10)
             steering = slew_towards(
                 self._steering_cmd, steering_target,
-                self.cfg.get('manual.steering_slew_rate', 2.5), dt)
+                self.cfg.get('manual.steering_slew_rate', 1.5), dt)
 
             current_throttle = self._throttle_cmd
             if current_throttle * throttle_target < 0.0 or \
@@ -633,7 +649,7 @@ class ManualDriveCollector(object):
                         connected = getattr(
                             self.controller, 'connected', False)
                         video_fps = max(1.0, float(self.cfg.get(
-                            'manual.video_fps', 20)))
+                            'manual.video_fps', 15)))
                         if self._video_recorder is not None and \
                                 (now_mono - last_video_submit) >= \
                                 (1.0 / video_fps):
@@ -923,7 +939,7 @@ class ManualDriveCollector(object):
                 'max_steering': float(self.max_steering.value),
                 'steering_expo': float(self.steering_expo.value),
                 'steering_slew_rate': float(self.cfg.get(
-                    'manual.steering_slew_rate', 2.5)),
+                    'manual.steering_slew_rate', 1.5)),
                 'min_throttle': float(self.min_throttle.value),
                 'max_throttle': float(self.max_throttle.value),
                 'throttle_rise_rate': float(self.cfg.get(
@@ -936,7 +952,15 @@ class ManualDriveCollector(object):
             'save_hz_requested': float(self.save_hz.value),
             'record_video': bool(self.record_video.value),
             'video_fps_requested': float(self.cfg.get(
-                'manual.video_fps', 20)),
+                'manual.video_fps', 15)),
+            'driver_safety': {
+                'steering_output_min': self.cfg.get(
+                    'control.driver.steering_output_min'),
+                'steering_output_max': self.cfg.get(
+                    'control.driver.steering_output_max'),
+                'pulse_width_range': self.cfg.get(
+                    'control.driver.pulse_width_range'),
+            },
         }
 
     def _on_start_recording(self, _button=None):
@@ -958,9 +982,9 @@ class ManualDriveCollector(object):
             if self.record_video.value:
                 video_recorder = FrameRecorder(
                     os.path.join(writer.session_dir, 'drive.avi'),
-                    fps=float(self.cfg.get('manual.video_fps', 20)),
+                    fps=float(self.cfg.get('manual.video_fps', 15)),
                     queue_size=int(self.cfg.get(
-                        'manual.video_queue_size', 60)),
+                        'manual.video_queue_size', 30)),
                     extra_fields=[
                         'steering_raw', 'throttle_raw',
                         'steering_cmd', 'throttle_cmd'])

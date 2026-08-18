@@ -8,13 +8,21 @@ from jetracer.nvidia_racecar import NvidiaRacecar
 car = NvidiaRacecar()
 
 try:
-    # Khong mo 500-2500: servo co the cham chan, stall va lam sut nguon Jetson.
-    car.steering_motor.set_pulse_width_range(750, 2250)
-    print("✅ Đã đặt giới hạn lái an toàn (PWM: 750 - 2250).")
+    # Fallback doc lap khong co hard-limit cua driver chinh, nen thu hep range.
+    # Voi steering_gain=0.75 va lenh toi da=0.8, xung chi khoang 1260-1740 us.
+    car.steering_motor.set_pulse_width_range(1100, 1900)
+    print("✅ Đã đặt giới hạn lái low-power (PWM: 1100 - 1900).")
 except Exception as e:
     print("⚠️ Không thể can thiệp xung PWM:", e)
 
-car.steering_gain = -0.65
+car.steering_gain = -0.75
+
+
+def lai_an_toan(x):
+    x = max(-1.0, min(1.0, float(x)))
+    # Expo 0.45 + cap 0.80: mem quanh tam, khong danh het bien co khi.
+    shaped = 0.55 * x + 0.45 * x * x * x
+    return max(-0.80, min(0.80, shaped))
 
 
 # ========================================================
@@ -38,7 +46,7 @@ def thuc_hien_ket_noi(b):
         if len(controller.axes) >= 3:
             try:
                 # ĐÃ ĐỔI THÀNH AXES[2]: Dùng Cần gạt PHẢI để bẻ lái (Trái/Phải)
-                traitlets.dlink((controller.axes[2], 'value'), (car, 'steering'), transform=lambda x: x)
+                traitlets.dlink((controller.axes[2], 'value'), (car, 'steering'), transform=lai_an_toan)
                 
                 # GIỮ NGUYÊN AXES[1]: Dùng Cần gạt TRÁI để chạy (Tiến/Lùi)
                 traitlets.dlink((controller.axes[1], 'value'), (car, 'throttle'), transform=lambda x: -x)

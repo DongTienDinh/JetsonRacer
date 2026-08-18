@@ -56,6 +56,17 @@ python3 tools/check_hardware.py --skip-camera
 
 Chạy qua: môi trường Python → config → backend điều khiển. Backend **đã chốt là `nvidia`** (theo `control.txt` của BTC) — bước này chỉ để xác nhận thư viện `jetracer` có sẵn trên xe, không phải để chọn lại backend.
 
+Script cũng kiểm tra `nvpmodel`. JetRacer phải chạy Jetson ở chế độ 5W trước
+khi thử actuator hoặc vừa quay video vừa lái:
+
+```bash
+sudo nvpmodel -m 1
+nvpmodel -q
+```
+
+Nếu chưa thấy `5W`/mode `1`, script sẽ không chạy bước actuator. Đây là yêu cầu
+nguồn của hướng dẫn Waveshare, không phải tham số làm mượt tay cầm.
+
 Nếu `nvidia` báo `KHONG`, tìm xem xe dùng thư viện gì:
 
 ```bash
@@ -87,10 +98,17 @@ python3 tools/check_hardware.py --driver nvidia --camera-seconds 5
 > **KÊ XE LÊN GIÁ. BÁNH XE KHÔNG ĐƯỢC CHẠM ĐẤT.** Bước này làm bánh quay.
 
 ```bash
+# Tách riêng tải servo trước
+python3 tools/check_hardware.py --driver nvidia --actuator \
+  --wheels-are-lifted --steering-only
+
+# Chỉ chạy sau khi bước trên ổn định
 python3 tools/check_hardware.py --driver nvidia --actuator --wheels-are-lifted
 ```
 
-Script quét góc lái giữa → trái → giữa → phải → giữa (động cơ không chạy), rồi một xung ga 0.6 giây. **Bạn phải tự kiểm tra bằng mắt:**
+Script quét low-power `0 → -0.35 → 0 → +0.35 → 0`, làm mới lệnh liên tục để
+watchdog không tự trả lái, rồi mới phát xung ga 0.6 giây nếu không dùng
+`--steering-only`. **Bạn phải tự kiểm tra bằng mắt:**
 
 | Quan sát | Nếu sai thì sửa |
 |---|---|
@@ -173,8 +191,9 @@ Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → kê xe và tick xác nh
 là gate của hai nút test, không can thiệp ARM lái thật. `Ga khởi động` mặc định
 0.12 và `Ga tối đa` 0.30; hiệu chuẩn ngưỡng khởi động khi xe vẫn đang kê. Không
 tăng `Lái tối đa`, `steering_gain` hoặc mở rộng PWM nếu servo chưa được kiểm tra
-chặn cơ khí; profile mặc định giới hạn PWM thực tế khoảng 1085–1915 µs khi lái
-tay hết cần và đổi góc từ từ bằng slew-rate.
+chặn cơ khí. Profile low-power giới hạn lệnh lái tay ở `0.60`, expo `0.45`,
+slew-rate `1.5/s`; tầng driver chặn cứng output ở `[-0.40,+0.40]`, tương đương
+khoảng `1200–1800 µs`. Giới hạn cứng áp dụng cả UI, PID và FSM.
 Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping
 thật của từng loại tay cầm; không giả định mọi tay cầm đều là axes 2/1 và button
 4. Nút `DỪNG KHẨN CẤP` được tuần tự hóa với control loop: hủy bài test, dừng
@@ -247,6 +266,7 @@ Lý do phải chọn theo điểm mô phỏng: nhanh hơn 10 giây được **2 
 | `No module named 'jetracer.nvidia_racecar'` | Repo NVIDIA chưa nằm trong Python path; kiểm tra `~/jetracer/jetracer/nvidia_racecar.py` hoặc đặt `JETRACER_NVIDIA_ROOT` |
 | `No I2C device at address: 0x60` | Đang chạy code/kernel cũ. Backend mới chỉ dùng PCA9685 `0x40`; pull code, Shut Down toàn bộ kernel rồi chạy lại. Không thấy `40` trong `sudo i2cdetect -y -r 1` thì kiểm tra nguồn/cáp I²C |
 | `Failed to create CaptureSession` / camera 0 frame | Đóng mọi kernel camera, restart `nvargus-daemon`; nếu vẫn lỗi thì tắt nguồn và kiểm tra chiều cáp CSI |
+| Bẻ lái rồi Jetson/Jupyter “tắt” | Chạy `python3 tools/diagnose_shutdown.py monitor` trước lần thử và `check` sau đó. Boot ID đổi = Jetson đã reboot/mất nguồn; boot ID giữ nguyên = lấy traceback process/kernel. Nếu reboot: sạc/đổi bộ pin đồng đều, xác nhận 5W, kiểm tra servo/linkage có chạm chặn; không mở rộng PWM |
 | FPS tụt dần theo thời gian | Jetson bị throttle nhiệt — kiểm tra `tegrastats`, bật quạt |
 | Xe rẽ ngược hướng | Sai dấu `steering` (bước 4) hoặc sai dấu `cte` (bước 5) |
 | Xe trôi dần ra mép dù đường thẳng | `steering_offset` chưa hiệu chuẩn |
