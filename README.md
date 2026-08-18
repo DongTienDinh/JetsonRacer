@@ -143,7 +143,24 @@ deadzone và tăng tới `0.30`; hiệu chuẩn `Ga khởi động` tới mức 
 vừa quay khi xe đang kê. Profile low-power dùng expo `0.45`, giới hạn lệnh `0.60`
 và slew-rate `1.5 đơn vị/s`. Quan trọng hơn, driver chặn cứng output servo ở
 `[-0.40, +0.40]`; với PWM `750–2250 µs`, xung thực tế không vượt khoảng
-`1200–1800 µs` dù lệnh đến từ UI, PID hay FSM. Mỗi session được lưu riêng tại
+`1200–1800 µs` dù lệnh đến từ UI, PID hay FSM — đây là mức an toàn tạm thời lúc
+bring-up, không phải giới hạn cơ khí thật của servo.
+
+Mỗi slider lái/ga (`Deadzone`, `Lái tối đa`, `Độ mềm lái`, `Ga khởi động`,
+`Ga tối đa`, `Test lái`, `Test ga`) đi kèm một ô số bên cạnh, gõ số chính xác
+thay vì chỉ kéo chuột; ô số và slider dùng chung khoảng giá trị nên không kẹt
+ở mức mặc định bảo thủ của `configs/default.yaml`. Bên dưới mục *Test phần
+cứng độc lập* có panel **NÂNG CAO** để chỉnh trực tiếp `steering_gain`,
+`steering_offset`, `steering_output_min/max` và `throttle_gain` — đây mới là
+lớp quyết định góc lái/tốc độ thật (các slider phía trên chỉ là hệ số nhân
+*trước* lớp này), bấm **ÁP DỤNG GIỚI HẠN NÂNG CAO** để ghi thẳng vào driver
+đang chạy, không cần mở lại kernel. Thay đổi chỉ có hiệu lực trong phiên hiện
+tại (không ghi vào YAML) và tự DISARM xe sau khi áp dụng để bắt buộc ARM lại
+có chủ đích. **Trước khi tin số mới lúc lái thật, luôn kiểm tra bằng TEST
+SERVO (bánh đã kê) hoặc `tools/check_hardware.py --calibrate-steering`** —
+nới `steering_output_max` mà chưa xác nhận cơ khí là đúng cơ chế đã gây
+reboot do sụt áp khi servo kẹt chân (xem mục *Bẻ lái rồi Jetson/Jupyter “tắt”*
+bên dưới). Mỗi session được lưu riêng tại
 `data/driving/<session_timestamp>/` gồm
 ảnh gốc, `labels.csv`, `drive.avi`, `drive.sidecar.csv` và `metadata.json`.
 Video và ảnh JPEG đều được ghi ở thread riêng (mỗi loại một hàng đợi giới hạn)

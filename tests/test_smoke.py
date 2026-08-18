@@ -486,8 +486,15 @@ def test_manual_collector_preview_control_and_recording():
             self.value = value
             self.description = description
             self.disabled = False
+            self._observers = []
             for key, item in kwargs.items():
                 setattr(self, key, item)
+
+        def observe(self, callback, names=None):
+            # Khong mo phong reactivity that (khong bao gio goi callback khi
+            # .value doi) - chi de cac widget dong bo (slider <-> o nhap so)
+            # trong ManualDriveCollector khoi tao duoc ma khong AttributeError.
+            self._observers.append(callback)
 
     class FakeLayout(object):
         def __init__(self, **kwargs):
@@ -541,6 +548,7 @@ def test_manual_collector_preview_control_and_recording():
     fake_widgets.HTML = FakeWidget
     fake_widgets.Text = FakeWidget
     fake_widgets.BoundedIntText = FakeWidget
+    fake_widgets.BoundedFloatText = FakeWidget
     fake_widgets.Checkbox = FakeWidget
     fake_widgets.FloatSlider = FakeWidget
     fake_widgets.Button = FakeButton

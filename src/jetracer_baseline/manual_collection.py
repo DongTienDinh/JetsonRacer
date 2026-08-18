@@ -341,25 +341,25 @@ class ManualDriveCollector(object):
             value=False, description='Dao truc lai')
         self.invert_throttle = widgets.Checkbox(
             value=True, description='Dao truc ga')
-        self.deadzone = widgets.FloatSlider(
-            value=0.06, min=0.0, max=0.25, step=0.01,
-            description='Deadzone:', readout_format='.2f')
-        self.max_steering = widgets.FloatSlider(
-            value=float(self.cfg.get('manual.max_steering', 0.60)),
-            min=0.20, max=1.00, step=0.05,
-            description='Lai toi da:', readout_format='.2f')
-        self.steering_expo = widgets.FloatSlider(
-            value=float(self.cfg.get('manual.steering_expo', 0.45)),
-            min=0.0, max=0.80, step=0.05,
-            description='Do mem lai:', readout_format='.2f')
-        self.min_throttle = widgets.FloatSlider(
-            value=float(self.cfg.get('manual.min_throttle', 0.12)),
-            min=0.0, max=0.30, step=0.01,
-            description='Ga khoi dong:', readout_format='.2f')
-        self.max_throttle = widgets.FloatSlider(
-            value=float(self.cfg.get('manual.max_throttle', 0.30)),
-            min=0.05, max=0.60, step=0.01,
-            description='Ga toi da:', readout_format='.2f')
+        # Slider + o nhap so dong bo hai chieu: keo nhanh hoac go so chinh
+        # xac. Bien tren cung la TRAN CAU TRUC that (khong gian lenh chuan
+        # hoa -1..1) - khong phai muc mac dinh dat cho lan chay dau, nen
+        # nguoi dung co the go het muc thay vi bi khoa duoi gia tri "an toan"
+        # ban dau trong config.
+        self.deadzone, self.deadzone_input = self._slider_with_input(
+            0.06, 0.0, 0.40, 0.01, 'Deadzone:')
+        self.max_steering, self.max_steering_input = self._slider_with_input(
+            float(self.cfg.get('manual.max_steering', 0.60)),
+            0.0, 1.00, 0.01, 'Lai toi da:')
+        self.steering_expo, self.steering_expo_input = self._slider_with_input(
+            float(self.cfg.get('manual.steering_expo', 0.45)),
+            0.0, 1.00, 0.01, 'Do mem lai:')
+        self.min_throttle, self.min_throttle_input = self._slider_with_input(
+            float(self.cfg.get('manual.min_throttle', 0.12)),
+            0.0, 1.00, 0.01, 'Ga khoi dong:')
+        self.max_throttle, self.max_throttle_input = self._slider_with_input(
+            float(self.cfg.get('manual.max_throttle', 0.30)),
+            0.0, 1.00, 0.01, 'Ga toi da:')
         self.save_hz = widgets.FloatSlider(
             value=5.0, min=1.0, max=20.0, step=1.0,
             description='Luu FPS:', readout_format='.0f')
@@ -373,13 +373,44 @@ class ManualDriveCollector(object):
         self.wheels_lifted = widgets.Checkbox(
             value=False, description='BANH XE DA KE KHOI MAT DAT',
             style={'description_width': 'initial'})
-        self.test_steering = widgets.FloatSlider(
-            value=0.45, min=0.10, max=0.75, step=0.05,
-            description='Test lai:', readout_format='.2f')
-        self.test_throttle = widgets.FloatSlider(
-            value=float(self.cfg.get('manual.test_throttle', 0.25)),
-            min=0.10, max=0.50, step=0.01,
-            description='Test ga:', readout_format='.2f')
+        self.test_steering, self.test_steering_input = self._slider_with_input(
+            0.45, 0.0, 1.00, 0.05, 'Test lai:')
+        self.test_throttle, self.test_throttle_input = self._slider_with_input(
+            float(self.cfg.get('manual.test_throttle', 0.25)),
+            0.0, 1.00, 0.01, 'Test ga:')
+
+        # ----- Nang cao: gioi han PHAN CUNG that (steering_gain/offset, khoa
+        # cung steering_output_min/max, throttle_gain). Day la lop quyet dinh
+        # goc lai/toc do THAT chu khong phai cac o phia tren (cac o do chi la
+        # he so nhan truoc lop nay). Ap dung song truc tiep vao driver dang
+        # chay - KHONG can mo lai kernel/camera, va KHONG ghi vao
+        # configs/default.yaml (chi hieu luc trong phien nay).
+        driver_cfg = 'control.driver.'
+        self.adv_steering_gain = widgets.BoundedFloatText(
+            value=float(self.cfg.get(driver_cfg + 'steering_gain', -0.65) or -0.65),
+            min=-2.0, max=2.0, step=0.01, description='steering_gain:',
+            style={'description_width': '150px'})
+        self.adv_steering_offset = widgets.BoundedFloatText(
+            value=float(self.cfg.get(driver_cfg + 'steering_offset', 0.0) or 0.0),
+            min=-1.0, max=1.0, step=0.01, description='steering_offset:',
+            style={'description_width': '150px'})
+        self.adv_steering_output_min = widgets.BoundedFloatText(
+            value=float(self.cfg.get(
+                driver_cfg + 'steering_output_min', -0.40) or -0.40),
+            min=-1.0, max=1.0, step=0.01, description='steering_output_min:',
+            style={'description_width': '150px'})
+        self.adv_steering_output_max = widgets.BoundedFloatText(
+            value=float(self.cfg.get(
+                driver_cfg + 'steering_output_max', 0.40) or 0.40),
+            min=-1.0, max=1.0, step=0.01, description='steering_output_max:',
+            style={'description_width': '150px'})
+        self.adv_throttle_gain = widgets.BoundedFloatText(
+            value=float(self.cfg.get(driver_cfg + 'throttle_gain', 0.8) or 0.8),
+            min=-1.5, max=1.5, step=0.01, description='throttle_gain:',
+            style={'description_width': '150px'})
+        self.btn_apply_advanced = widgets.Button(
+            description='AP DUNG GIOI HAN NANG CAO', button_style='danger',
+            layout=widgets.Layout(width='230px', height='38px'))
 
         self.btn_probe = widgets.Button(
             description='0. KIEM TRA TAY CAM', button_style='info',
@@ -422,6 +453,7 @@ class ManualDriveCollector(object):
         self.btn_disarm.on_click(self._on_disarm)
         self.btn_test_steering.on_click(self._on_test_steering)
         self.btn_test_motor.on_click(self._on_test_motor)
+        self.btn_apply_advanced.on_click(self._on_apply_advanced)
         if hasattr(self.wheels_lifted, 'observe'):
             self.wheels_lifted.observe(
                 self._on_wheels_lifted_change, names='value')
@@ -455,6 +487,43 @@ class ManualDriveCollector(object):
         self._actuator_stop_event = threading.Event()
 
         atexit.register(self.close)
+
+    def _slider_with_input(self, value, minv, maxv, step, description):
+        """FloatSlider + BoundedFloatText dung CHUNG mot khoang gia tri, dong
+        bo hai chieu qua observe(). Chung phai chung min/max, neu khong gan
+        gia tri tu widget nay sang widget kia co the vuot bien va nem
+        TraitError. Tra ve (slider, text_input)."""
+        slider = self.widgets.FloatSlider(
+            value=value, min=minv, max=maxv, step=step,
+            description=description, readout_format='.3f',
+            style={'description_width': '110px'},
+            layout=self.widgets.Layout(width='420px'))
+        text = self.widgets.BoundedFloatText(
+            value=value, min=minv, max=maxv, step=step,
+            layout=self.widgets.Layout(width='90px'))
+        busy = {'on': False}
+
+        def _from_slider(change):
+            if busy['on']:
+                return
+            busy['on'] = True
+            try:
+                text.value = change['new']
+            finally:
+                busy['on'] = False
+
+        def _from_text(change):
+            if busy['on']:
+                return
+            busy['on'] = True
+            try:
+                slider.value = change['new']
+            finally:
+                busy['on'] = False
+
+        slider.observe(_from_slider, names='value')
+        text.observe(_from_text, names='value')
+        return slider, text
 
     def _command_html(self):
         use_deadman = bool(getattr(
@@ -989,6 +1058,60 @@ class ManualDriveCollector(object):
     def _on_test_motor(self, _button=None):
         self._run_actuator_test('motor')
 
+    def _on_apply_advanced(self, _button=None):
+        """Ghi song cac gioi han PHAN CUNG that (gain/offset/hard-limit) vao
+        driver dang chay. Day la lop quyet dinh goc lai/toc do THAT - cac o
+        'Lai toi da'/'Ga toi da' o tren chi la he so nhan TRUOC lop nay, nen
+        chi tang chung khong the vuot qua hard-limit o day.
+
+        Khong bat buoc banh xe da ke (gan gia tri Python thuan tuy khong lam
+        xe cu dong), nhung se tu DISARM sau khi ap dung de buoc nguoi dung
+        chu dong ARM lai - tranh gioi han moi am tham co hieu luc giua luc
+        dang lai. KHONG ghi lai configs/default.yaml; chi hieu luc trong
+        phien nay.
+        """
+        if self._driver is None:
+            self._log(
+                'Chua co driver de ap dung. Bam MO CAMERA/KIEM TRA TAY CAM '
+                'hoac ARM truoc, hoac chon driver_kind=nvidia khi khoi tao.')
+            return
+
+        output_min = _clip(float(self.adv_steering_output_min.value), -1.0, 1.0)
+        output_max = _clip(float(self.adv_steering_output_max.value), -1.0, 1.0)
+        if output_min > output_max:
+            self._log(
+                'TU CHOI: steering_output_min (%.3f) > steering_output_max '
+                '(%.3f).' % (output_min, output_max))
+            return
+
+        was_armed = self._armed
+        self._armed = False
+        self._zero_command()
+
+        with self._driver_io_lock:
+            self._driver.steering_gain = float(self.adv_steering_gain.value)
+            self._driver.steering_offset = float(self.adv_steering_offset.value)
+            self._driver.steering_output_min = output_min
+            self._driver.steering_output_max = output_max
+            self._driver.throttle_gain = float(self.adv_throttle_gain.value)
+            try:
+                self._driver.stop()
+            except Exception as exc:
+                self._log('LOI khi cat ga sau khi doi gioi han: %s' % exc)
+
+        self.driver_view.value = self._driver_html()
+        self._log(
+            'DA AP DUNG gioi han nang cao (CHI PHIEN NAY, chua ghi vao '
+            'configs/default.yaml): steering_gain=%.3f offset=%.3f '
+            'output=[%+.3f, %+.3f] throttle_gain=%.3f.' % (
+                self._driver.steering_gain, self._driver.steering_offset,
+                output_min, output_max, self._driver.throttle_gain))
+        self._set_status(
+            'DA DOI GIOI HAN LAI - kiem tra bang TEST SERVO (banh da ke) '
+            'truoc khi ARM lai xe that')
+        if was_armed:
+            self._log('Da tu DISARM vi vua doi gioi han. Bam ARM TAY CAM de lai tiep.')
+
     def _metadata(self):
         return {
             'purpose': 'manual_driving_collection',
@@ -1024,11 +1147,25 @@ class ManualDriveCollector(object):
             'record_video': bool(self.record_video.value),
             'video_fps_requested': float(self.cfg.get(
                 'manual.video_fps', 15)),
+            # Doc tu driver dang chay truoc (phan anh dung gia tri hieu luc
+            # neu da bam AP DUNG GIOI HAN NANG CAO), fallback ve cfg file neu
+            # driver chua ket noi.
             'driver_safety': {
-                'steering_output_min': self.cfg.get(
-                    'control.driver.steering_output_min'),
-                'steering_output_max': self.cfg.get(
-                    'control.driver.steering_output_max'),
+                'steering_gain': getattr(
+                    self._driver, 'steering_gain',
+                    self.cfg.get('control.driver.steering_gain')),
+                'steering_offset': getattr(
+                    self._driver, 'steering_offset',
+                    self.cfg.get('control.driver.steering_offset')),
+                'steering_output_min': getattr(
+                    self._driver, 'steering_output_min',
+                    self.cfg.get('control.driver.steering_output_min')),
+                'steering_output_max': getattr(
+                    self._driver, 'steering_output_max',
+                    self.cfg.get('control.driver.steering_output_max')),
+                'throttle_gain': getattr(
+                    self._driver, 'throttle_gain',
+                    self.cfg.get('control.driver.throttle_gain')),
                 'pulse_width_range': self.cfg.get(
                     'control.driver.pulse_width_range'),
             },
@@ -1154,22 +1291,39 @@ class ManualDriveCollector(object):
         warning = w.HTML(
             '<b style="color:#b00020">AN TOAN:</b> checkbox ke banh chi bat '
             'buoc khi TEST SERVO/MOTOR; khong dung checkbox nay de ARM lai '
-            'tren mat dat. Lai da duoc gioi han va lam muot; khong tang bien '
-            'lai/PWM khi chua hieu chuan. Nut DUNG KHAN CAP luon cat ga ngay.')
+            'tren mat dat. Cac o so ben canh slider cho phep go chinh xac va '
+            'vuot muc mac dinh cua config, nhung tran cau truc (+/-1.0 khong '
+            'gian lenh) van giu nguyen. Phan "NANG CAO" doi truc tiep gain/'
+            'hard-limit that cua servo - CHUA hieu chuan co khi (xem '
+            'tools/check_hardware.py --calibrate-steering) thi khong day len '
+            'gan +/-1.0. Nut DUNG KHAN CAP luon cat ga ngay.')
         settings1 = w.HBox([
             self.session_name, self.steering_axis, self.throttle_axis])
         settings2 = w.HBox([
-            self.invert_steering, self.invert_throttle, self.deadzone])
+            self.invert_steering, self.invert_throttle,
+            self.deadzone, self.deadzone_input])
         steering_settings = w.HBox([
-            self.max_steering, self.steering_expo])
+            self.max_steering, self.max_steering_input,
+            self.steering_expo, self.steering_expo_input])
         settings3 = w.HBox([
-            self.min_throttle, self.max_throttle,
-            self.save_hz, self.record_video])
+            self.min_throttle, self.min_throttle_input,
+            self.max_throttle, self.max_throttle_input])
+        settings4 = w.HBox([self.save_hz, self.record_video])
         hardware_test = w.VBox([
             w.HTML('<b>Test phan cung doc lap (chi khi xe da ke):</b>'),
-            w.HBox([self.wheels_lifted, self.test_steering,
-                    self.test_throttle]),
+            w.HBox([self.wheels_lifted]),
+            w.HBox([self.test_steering, self.test_steering_input]),
+            w.HBox([self.test_throttle, self.test_throttle_input]),
             w.HBox([self.btn_test_steering, self.btn_test_motor]),
+        ])
+        advanced_panel = w.VBox([
+            w.HTML(
+                '<b>NANG CAO - gioi han PHAN CUNG that (chi phien nay, '
+                'khong ghi vao configs/default.yaml):</b>'),
+            w.HBox([self.adv_steering_gain, self.adv_steering_offset]),
+            w.HBox([self.adv_steering_output_min, self.adv_steering_output_max]),
+            w.HBox([self.adv_throttle_gain]),
+            self.btn_apply_advanced,
         ])
         buttons = w.HBox([
             self.btn_probe, self.btn_camera, self.btn_arm, self.btn_record])
@@ -1185,7 +1339,9 @@ class ManualDriveCollector(object):
             settings2,
             steering_settings,
             settings3,
+            settings4,
             hardware_test,
+            advanced_panel,
             buttons,
             stop_buttons,
             self.status,
