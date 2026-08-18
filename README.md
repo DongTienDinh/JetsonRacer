@@ -146,7 +146,10 @@ và slew-rate `1.5 đơn vị/s`. Quan trọng hơn, driver chặn cứng output
 `1200–1800 µs` dù lệnh đến từ UI, PID hay FSM. Mỗi session được lưu riêng tại
 `data/driving/<session_timestamp>/` gồm
 ảnh gốc, `labels.csv`, `drive.avi`, `drive.sidecar.csv` và `metadata.json`.
-Video được ghi ở thread riêng nên không chặn vòng điều khiển; sidecar nối từng
+Video và ảnh JPEG đều được ghi ở thread riêng (mỗi loại một hàng đợi giới hạn)
+nên không chặn vòng camera/điều khiển; nếu thẻ SD/eMMC ghi chậm, hệ thống thà
+bỏ vài mẫu (đếm ở `samples_dropped` / `video_frames_dropped` trong
+`metadata.json`) còn hơn làm khựng cam hoặc trễ lệnh lái. Sidecar nối từng
 frame video với `frame_id`, thời gian và lệnh lái/ga. Mặc định video ghi 15 FPS
 để giảm tải Jetson, còn `Lưu FPS` chỉ điều khiển tần suất ảnh JPEG/nhãn. Với dataset segmentation bài 1, để
 `Lưu FPS = 5`; nếu sau này train imitation learning thì tăng lên 15–20 FPS.

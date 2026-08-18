@@ -27,7 +27,12 @@ import csv
 import io
 import json
 import os
+try:
+    import Queue as queue  # Python 2 (khong dung nhung phong khi)
+except ImportError:
+    import queue
 import re
+import sys
 import threading
 import time
 
@@ -136,10 +141,19 @@ class _PacedFrameSource(object):
 
 
 class DatasetSessionWriter(object):
-    """Ghi mot session theo cau truc images/ + labels.csv + metadata.json."""
+    """Ghi mot session theo cau truc images/ + labels.csv + metadata.json.
+
+    Ma hoa JPEG + ghi dia la phan cham nhat cua vong camera (co the mat vai
+    chuc ms moi lan tren the SD/eMMC cua Jetson). `write()` chi ghim frame vao
+    mot hang cho gioi han roi tra ve ngay; mot thread rieng ghi dia tuan tu.
+    Nho vay vong camera (va ca vong dieu khien, vi hai thread chia GIL) khong
+    bi khung theo I/O dia moi lan luu mau, dung nguyen tac da dung cho video o
+    `recorder.FrameRecorder`. Hang cho day thi bo frame (dem `dropped`), thay
+    vi lam tut nhip cam/lai.
+    """
 
     def __init__(self, out_root, session, metadata=None, jpeg_quality=95,
-                 flush_every=10):
+                 flush_every=10, queue_size=64):
         stamp = time.strftime('%Y%m%d_%H%M%S')
         base_name = '%s_%s' % (_safe_session_name(session), stamp)
         self.session_dir = os.path.join(out_root, base_name)
@@ -159,6 +173,9 @@ class DatasetSessionWriter(object):
         self._jpeg_quality = int(_clip(jpeg_quality, 50, 100))
         self._flush_every = max(1, int(flush_every))
         self._count = 0
+        self._next_id = 0
+        self._dropped = 0
+        self._error = None
         self._closed = False
         self._shape = None
         self._metadata = dict(metadata or {})
@@ -166,9 +183,23 @@ class DatasetSessionWriter(object):
         self._metadata['created_unix'] = time.time()
         self._write_metadata(completed=False)
 
+        self._queue = queue.Queue(maxsize=max(1, int(queue_size)))
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop, name='dataset-image-writer')
+        self._writer_thread.daemon = True
+        self._writer_thread.start()
+
     @property
     def count(self):
         return self._count
+
+    @property
+    def dropped(self):
+        return self._dropped
+
+    @property
+    def error(self):
+        return self._error
 
     def update_metadata(self, values):
         self._metadata.update(dict(values or {}))
@@ -177,6 +208,7 @@ class DatasetSessionWriter(object):
         data = dict(self._metadata)
         data['completed'] = bool(completed)
         data['samples'] = self._count
+        data['samples_dropped'] = self._dropped
         if self._shape is not None:
             data['frame_height'] = int(self._shape[0])
             data['frame_width'] = int(self._shape[1])
@@ -188,20 +220,23 @@ class DatasetSessionWriter(object):
               timestamp_monotonic, steering_raw, throttle_raw,
               steering_cmd, throttle_cmd, deadman_pressed,
               controller_connected):
+        """Ghim frame vao hang cho ghi dia; khong bao gio block vong goi.
+
+        Loi I/O (dia day, quyen ghi...) xay ra o thread nen duoc nem lai o lan
+        goi `write()` ke tiep, xem `_writer_loop`.
+        """
         if self._closed:
             raise RuntimeError('Session writer da dong')
         if frame is None or not hasattr(frame, 'shape'):
             raise ValueError('Frame khong hop le')
+        if self._error is not None:
+            raise self._error
 
-        sample_id = self._count
+        sample_id = self._next_id
+        self._next_id += 1
         image_file = 'frame_%06d.jpg' % sample_id
         image_path = os.path.join(self.images_dir, image_file)
-        params = [int(cv2.IMWRITE_JPEG_QUALITY), self._jpeg_quality]
-        if not cv2.imwrite(image_path, frame, params):
-            raise IOError('Khong ghi duoc anh: ' + image_path)
-
-        self._shape = frame.shape
-        self._csv.writerow({
+        row = {
             'sample_id': sample_id,
             'image_file': os.path.join('images', image_file).replace('\\', '/'),
             'camera_frame_id': int(camera_frame_id),
@@ -213,18 +248,48 @@ class DatasetSessionWriter(object):
             'throttle_cmd': '%.6f' % float(throttle_cmd),
             'deadman_pressed': int(bool(deadman_pressed)),
             'controller_connected': int(bool(controller_connected)),
-        })
-        self._count += 1
-        if self._count % self._flush_every == 0:
-            self._fh.flush()
+        }
+        try:
+            self._queue.put_nowait((frame, image_path, row))
+        except queue.Full:
+            self._dropped += 1
+            return None
         return image_path
 
-    def close(self):
+    def _writer_loop(self):
+        while True:
+            try:
+                frame, image_path, row = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                if self._closed:
+                    return
+                continue
+            try:
+                params = [int(cv2.IMWRITE_JPEG_QUALITY), self._jpeg_quality]
+                if not cv2.imwrite(image_path, frame, params):
+                    raise IOError('Khong ghi duoc anh: ' + image_path)
+                self._shape = frame.shape
+                self._csv.writerow(row)
+                self._count += 1
+                if self._count % self._flush_every == 0:
+                    self._fh.flush()
+            except Exception as exc:
+                self._error = exc
+            finally:
+                self._queue.task_done()
+
+    def close(self, drain_timeout=5.0):
         if self._closed:
             return
+        self._closed = True
+        deadline = time.monotonic() + max(0.0, float(drain_timeout))
+        while not self._queue.empty() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if self._writer_thread.is_alive():
+            self._writer_thread.join(
+                timeout=max(0.1, deadline - time.monotonic()))
         self._fh.flush()
         self._fh.close()
-        self._closed = True
         self._write_metadata(completed=True)
 
 
@@ -240,6 +305,12 @@ class ManualDriveCollector(object):
             raise ImportError(
                 'Can ipywidgets trong moi truong Jupyter. Kiem tra bang: '
                 'python3 -c "import ipywidgets; print(ipywidgets.__version__)"')
+
+        # Mac dinh CPython nhuong GIL moi 5ms; khi thread camera ma hoa/ghi
+        # anh (hoac video) nang tay, vong dieu khien 30 Hz co the phai doi ca
+        # chu ky do. Giam interval de cac thread doi nhau it hon, uu tien do
+        # phan hoi cua lai/xe hon thong luong tong (chap nhan duoc o tai nay).
+        sys.setswitchinterval(0.001)
 
         self.widgets = widgets
         self.config_path = config_path
@@ -978,7 +1049,8 @@ class ManualDriveCollector(object):
         try:
             writer = DatasetSessionWriter(
                 self.out_root, self.session_name.value,
-                metadata=self._metadata())
+                metadata=self._metadata(),
+                queue_size=int(self.cfg.get('manual.image_queue_size', 64)))
             if self.record_video.value:
                 video_recorder = FrameRecorder(
                     os.path.join(writer.session_dir, 'drive.avi'),
@@ -1035,9 +1107,12 @@ class ManualDriveCollector(object):
                 'video_error': video_error,
             })
             writer.close()
+            if writer.error is not None:
+                self._log('LOI GHI ANH (co the mat vai sample cuoi): %s' %
+                          writer.error)
             self._last_session_dir = writer.session_dir
-            self._log('DUNG GHI: %d anh, %d frame video, bo %d -> %s' % (
-                writer.count, video_written, video_dropped,
+            self._log('DUNG GHI: %d anh (bo %d), %d frame video (bo %d) -> %s' % (
+                writer.count, writer.dropped, video_written, video_dropped,
                 writer.session_dir))
         if self._armed:
             self._set_status('da dung ghi; xe van ARM')

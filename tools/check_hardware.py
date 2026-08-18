@@ -4,10 +4,15 @@
     python3 tools/check_hardware.py                  # buoc 1-5, KHONG chay motor
     python3 tools/check_hardware.py --driver nvidia --actuator --wheels-are-lifted
 
-Thu tu cac buoc co chu dich: moi buoc chi chay khi buoc truoc da qua. Buoc 6
-(dong co) bi khoa sau co --wheels-are-lifted vi xe co the lao di.
+    # Tim gioi han co khi that de cua gat hon (xem calibrate_steering()):
+    python3 tools/check_hardware.py --driver nvidia --calibrate-steering \
+        --wheels-are-lifted
 
-!! TRUOC KHI CHAY BUOC 6: KE XE LEN GIA, BANH KHONG CHAM DAT !!
+Thu tu cac buoc co chu dich: moi buoc chi chay khi buoc truoc da qua. Buoc 6
+(dong co) va buoc 7 (hieu chuan lai) bi khoa sau co --wheels-are-lifted vi xe
+co the lao di / banh cham gam.
+
+!! TRUOC KHI CHAY BUOC 6 HOAC 7: KE XE LEN GIA, BANH KHONG CHAM DAT !!
 """
 
 from __future__ import print_function
@@ -314,6 +319,84 @@ def check_actuator(kind, lifted, cfg, steering_only=False):
     return True
 
 
+def calibrate_steering(kind, cfg):
+    """Quet dan output servo tu giua ra hai bien de tim gioi han CO KHI that.
+
+    `pulse_width_range` (750-2250 us) la bien AN TOAN VE DIEN da duoc BTC xac
+    nhan (control.txt: rong hon --> servo cham chan, stall, sut nguon). Nhung
+    `steering_output_min/max` (mac dinh +/-0.40) la mot lop khoa MEM, chot tam
+    trong luc bring-up vi chua ai do goc bam cua that su truoc khi banh cham
+    gam/hoc banh. Ham nay giup do dung con so do, thay vi doan mo.
+    """
+    step(7, 'HIEU CHUAN GOC LAI TOI DA  [RUI RO - PHAI NHIN BANH LIEN TUC]')
+    print('  Quet CHAM tu giua ra tung ben. NHIN THAT KY banh truoc.')
+    print('  BAM Ctrl+C NGAY KHI banh VUA CHAM gam/hoc banh - dung doi den khi')
+    print('  ket cung hoac nghe tieng servo ru. Dong "output=" IN NGAY TRUOC')
+    print('  dong cuoi cung (truoc khi Ctrl+C) la gia tri con AN TOAN.')
+    print('')
+
+    from jetracer_baseline.control.driver import build_driver
+
+    gain = float(cfg.get('control.driver.steering_gain', -0.65) or -0.65)
+    offset = float(cfg.get('control.driver.steering_offset', 0.0) or 0.0)
+    pulse_range = cfg.get('control.driver.pulse_width_range', [750, 2250]) \
+        or [750, 2250]
+    pulse_low, pulse_high = float(pulse_range[0]), float(pulse_range[1])
+
+    try:
+        drv = build_driver(kind, cfg)
+    except Exception as exc:
+        print('%s Khong khoi tao duoc driver "%s": %s' % (FAIL, kind, exc))
+        return False
+
+    # Mo het khoa mem de quet toi han cua pulse_width_range (van AN TOAN VE
+    # DIEN); buoc nay chi di tim gioi han CO KHI nam ben trong bien do.
+    drv.steering_output_min = -1.0
+    drv.steering_output_max = 1.0
+
+    step_size = 0.05
+    command, sign = 0.0, 1.0
+    try:
+        for side, sign in (('PHAI', 1.0), ('TRAI', -1.0)):
+            print('  -- Huong %s --' % side)
+            _hold_command(drv, 0.0, 0.0, 0.3)
+            command = 0.0
+            while abs(command) < 1.0 - 1e-9:
+                command = min(1.0, abs(command) + step_size) * sign
+                output = command * gain + offset
+                pulse = pulse_low + (output + 1.0) / 2.0 * (pulse_high - pulse_low)
+                print('    lenh=%+.2f  ->  output=%+.3f  (~%d us)' % (
+                    command, output, pulse))
+                _hold_command(drv, command, 0.0, 0.7)
+            _hold_command(drv, 0.0, 0.0, 0.3)
+    except KeyboardInterrupt:
+        prev_command = command - step_size * sign if abs(command) > step_size \
+            else 0.0
+        prev_output = prev_command * gain + offset
+        print('')
+        print('  Da dung theo yeu cau (Ctrl+C).')
+        print('  Buoc VUA IN co the da qua gioi han co khi. Buoc TRUOC DO '
+              '(an toan hon): output=%+.3f' % prev_output)
+    finally:
+        try:
+            drv.set(0.0, 0.0)
+        except Exception:
+            pass
+        try:
+            drv.close()
+        except Exception:
+            pass
+
+    print('')
+    print('%s Hieu chuan xong (hoac da dung som theo Ctrl+C).' % PASS)
+    print('       Lay gia tri output AN TOAN nho nhat trong hai ben (tru them')
+    print('       ~0.03-0.05 du phong), roi dien doi xung vao configs/default.yaml:')
+    print('         control.driver.steering_output_max:  <gia tri do duoc>')
+    print('         control.driver.steering_output_min:  -<gia tri do duoc>')
+    print('       Chua sua file config o day - ban tu chot sau khi da do that.')
+    return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Bring-up phan cung JetRacer')
     parser.add_argument('--driver', choices=['dryrun', 'nvidia', 'ros'],
@@ -327,6 +410,9 @@ def main(argv=None):
                         help='Xac nhan banh xe KHONG cham dat')
     parser.add_argument('--steering-only', action='store_true',
                         help='Chi test servo lai, khong quay motor')
+    parser.add_argument('--calibrate-steering', action='store_true',
+                        help='Quet dan output servo de tim gioi han co khi that '
+                             '(can --wheels-are-lifted, doc lap voi --actuator)')
     args = parser.parse_args(argv)
 
     print('=' * 66)
@@ -365,11 +451,24 @@ def main(argv=None):
     else:
         results['actuator'] = None
 
+    if args.calibrate_steering:
+        if not args.wheels_are_lifted:
+            print('\n%s --calibrate-steering can --wheels-are-lifted.' % FAIL)
+            results['calibrate_steering'] = False
+        elif results['power'] is False:
+            print('\n%s Bo qua hieu chuan vi Jetson chua o power mode 5W.' % FAIL)
+            results['calibrate_steering'] = False
+        else:
+            results['calibrate_steering'] = calibrate_steering(args.driver, cfg)
+    else:
+        results['calibrate_steering'] = None
+
     print('')
     print('=' * 66)
     print('TOM TAT')
     print('=' * 66)
-    for name in ('python', 'power', 'config', 'camera', 'driver', 'actuator'):
+    for name in ('python', 'power', 'config', 'camera', 'driver', 'actuator',
+                 'calibrate_steering'):
         value = results.get(name)
         mark = 'chua chay' if value is None else ('OK' if value else 'LOI')
         print('  %-9s : %s' % (name, mark))

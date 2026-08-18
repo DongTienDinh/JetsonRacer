@@ -49,6 +49,9 @@ manual:
   # MJPG dung CPU; 15 FPS giam tai Jetson nhung van du de doi chieu lai xe.
   video_fps: 15
   video_queue_size: 30
+  # Anh JPEG duoc ghi o thread rieng (khong chan vong camera/dieu khien);
+  # day roi thi bo mau thay vi lam khung cam khi the SD/eMMC cham.
+  image_queue_size: 64
 
 lane:
   # ROI: chỉ lấy phần dưới ảnh (mặt đường ngay trước xe)
