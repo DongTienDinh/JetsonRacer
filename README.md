@@ -114,8 +114,8 @@ jupyter notebook --ip=0.0.0.0 --port=8889 --no-browser
 Sau đó mở `collect_drive.ipynb` từ giao diện Jupyter và chạy lần lượt từng cell.
 Notebook đã có sẵn kiểm tra đường dẫn, launcher và cell in trạng thái chẩn đoán.
 Trước khi dựng giao diện, notebook chạy `tools/check_hardware.py` để mở camera
-3 giây, ghi `reports/camera_sample.jpg` rồi release. Nếu bước này thất bại thì
-không ARM xe.
+3 giây, ghi `reports/camera_sample.jpg`, sau đó khởi tạo driver thật và ghi
+neutral (`steering=0`, `throttle=0`). Nếu bước này thất bại thì không ARM xe.
 
 Kiểm tra widget trước khi chạy:
 
@@ -130,11 +130,12 @@ OpenCV/CUDA/TensorRT của JetPack:
 pip install "ipywidgets>=7.5,<8" "traitlets>=4.3"
 ```
 
-Giao diện đi theo thứ tự `KIỂM TRA TAY CẦM → TEST SERVO/MOTOR khi xe đã kê →
-MỞ CAMERA → ARM TAY CẦM → BẮT ĐẦU GHI`.
-Chỉ có một gate bắt buộc: tick `BÁNH XE ĐÃ KÊ KHỎI MẶT ĐẤT` trước khi test
-hoặc ARM. Dead-man mặc định tắt; ga vẫn bị giới hạn ở `0.20`. Bỏ tick trong lúc
-đang chạy sẽ cắt ga và DISARM ngay. Mỗi session được lưu riêng tại
+Giao diện đi theo thứ tự `KIỂM TRA TAY CẦM → kê xe và TEST SERVO/MOTOR →
+MỞ CAMERA → đặt xe xuống đất → ARM TAY CẦM → BẮT ĐẦU GHI`.
+Checkbox `BÁNH XE ĐÃ KÊ KHỎI MẶT ĐẤT` chỉ khóa hai nút test actuator, không
+khóa ARM lái thật. Dead-man mặc định tắt. Ga tay mặc định bắt đầu ở `0.12` sau
+deadzone và tăng tới `0.30`; hiệu chuẩn `Ga khởi động` tới mức nhỏ nhất làm bánh
+vừa quay khi xe đang kê. Mỗi session được lưu riêng tại
 `data/driving/<session_timestamp>/` gồm
 ảnh gốc, `labels.csv` và `metadata.json`. Với dataset segmentation bài 1, để
 `Lưu FPS = 5`; nếu sau này train imitation learning thì tăng lên 15–20 FPS.
@@ -168,7 +169,9 @@ viện cũ chỉ còn là đường dự phòng khi đổi `control.driver.imple
 Backend `nvidia` của project điều khiển trực tiếp PCA9685 duy nhất ở `0x40`,
 channel 0 cho lái và channel 1 cho ga; không còn tạo object motor `0x60` từ
 biến thể thư viện cũ. Driver có watchdog: mất lệnh UI quá 0.8 giây thì tự ghi
-ga về 0. Tắt kernel Jupyter cũ rồi chạy lại notebook sau mỗi lần cập nhật code.
+ga về 0. Tần số PWM để trống nhằm giữ mặc định 50 Hz của ServoKit; chỉ ép 60 Hz
+sau khi đã đo/kiểm chứng đúng servo và ESC. Tắt kernel Jupyter cũ rồi chạy lại
+notebook sau mỗi lần cập nhật code.
 Nếu không kết nối được driver, kiểm tra phần cứng trước:
 
 ```bash

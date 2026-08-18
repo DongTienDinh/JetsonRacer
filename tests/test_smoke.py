@@ -19,6 +19,7 @@ import types
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from jetracer_baseline import fsm as fsm_mod                     # noqa: E402
@@ -32,7 +33,8 @@ from jetracer_baseline.perception.lane import LaneDetector       # noqa: E402
 from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
 from jetracer_baseline.manual_collection import (                # noqa: E402
-    DatasetSessionWriter, ManualDriveCollector, apply_deadzone)
+    DatasetSessionWriter, ManualDriveCollector, apply_deadzone,
+    shape_throttle)
 
 CONFIG = os.path.join(ROOT, 'configs', 'default.yaml')
 
@@ -53,6 +55,9 @@ def test_config_loads():
     assert cfg.get('control.driver.steering_channel') == 0
     assert cfg.get('control.driver.throttle_channel') == 1
     assert cfg.get('control.driver.command_timeout_s') > 0
+    assert cfg.get('control.driver.pwm_frequency') is None
+    assert 0 < cfg.get('manual.min_throttle') < cfg.get('manual.max_throttle')
+    assert cfg.get('manual.test_throttle') >= cfg.get('manual.min_throttle')
     # Doc override phai ghi de dung, khong lam mat khoa khac
     cfg2 = load_config(CONFIG, [os.path.join(ROOT, 'configs', 'fast.yaml')])
     assert cfg2.get('control.v_max') > cfg.get('control.v_max')
@@ -72,6 +77,9 @@ def test_manual_collection_deadzone_and_writer():
     assert apply_deadzone(0.03, 0.06) == 0.0
     assert apply_deadzone(-0.03, 0.06) == 0.0
     assert 0.45 < apply_deadzone(0.50, 0.06) < 0.50
+    assert shape_throttle(0.03, 0.06, 0.12, 0.30) == 0.0
+    assert abs(shape_throttle(1.0, 0.06, 0.12, 0.30) - 0.30) < 1e-9
+    assert -0.22 < shape_throttle(-0.50, 0.06, 0.12, 0.30) < -0.19
 
     temp_root = tempfile.mkdtemp(prefix='jetracer_collect_')
     writer = None
@@ -359,7 +367,7 @@ def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
         driver_mod._load_servo_kit = lambda: FakeServoKit
         drv = driver_mod.NvidiaJetRacerDriver(
             implementation='waveshare_single_pca',
-            i2c_address=0x40, pwm_frequency=60,
+            i2c_address=0x40, pwm_frequency=None,
             steering_channel=0, throttle_channel=1,
             steering_gain=-1.0, steering_offset=0.0,
             throttle_gain=0.8, pulse_width_range=(500, 2500),
@@ -369,7 +377,7 @@ def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
         steering = kit.continuous_servo[0]
         throttle = kit.continuous_servo[1]
         assert kit.address == 0x40
-        assert kit._pca.frequency == 60
+        assert kit._pca.frequency is None
         assert steering.pulse_range == (500, 2500)
 
         drv.set(0.50, 0.25)
@@ -385,6 +393,34 @@ def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
         if drv is not None:
             drv.close()
         driver_mod._load_servo_kit = original_loader
+
+
+def test_hardware_preflight_initializes_driver_not_only_imports():
+    """Preflight phai mo driver that va ghi neutral truoc khi bao OK."""
+    from tools import check_hardware
+
+    events = []
+
+    class FakeDriver(object):
+        def stop(self):
+            events.append('stop')
+
+        def close(self):
+            events.append('close')
+
+    original_probe = driver_mod.probe
+    original_build = driver_mod.build_driver
+    try:
+        driver_mod.probe = lambda: {
+            'nvidia': 'OK (chi moi truong) - fake',
+            'dryrun': 'OK - fake',
+        }
+        driver_mod.build_driver = lambda kind, cfg: FakeDriver()
+        assert check_hardware.check_driver('nvidia', _cfg())
+        assert events == ['stop', 'close']
+    finally:
+        driver_mod.probe = original_probe
+        driver_mod.build_driver = original_build
 
 
 def test_latest_grabber_surfaces_background_camera_error():
@@ -507,13 +543,11 @@ def test_manual_collector_preview_control_and_recording():
         assert collector._grabber is not None
         assert collector.preview.value
 
-        # Chi mot gate bat buoc: phai tick banh xe da ke. Dead-man mac dinh tat.
-        collector._on_arm()
-        assert not collector._armed
-        assert not collector.use_deadman.value
-        collector.wheels_lifted.value = True
+        # ARM lai tren mat dat khong phu thuoc checkbox danh rieng cho actuator.
         collector._on_arm()
         assert collector._armed
+        assert not collector.use_deadman.value
+        assert not collector.wheels_lifted.value
         assert type(collector._driver).__name__ == 'DryRunDriver'
 
         collector.controller.buttons[4].pressed = True
@@ -579,11 +613,12 @@ def test_manual_collector_preview_control_and_recording():
         assert not collector._armed
         assert blocking.last == (0.0, 0.0)
 
+        # Checkbox ke banh chi thuoc bai test, bo tick khong duoc cat lai that.
         collector._armed = True
         blocking.last = (0.2, 0.2)
         collector._on_wheels_lifted_change({'new': False})
-        assert not collector._armed
-        assert blocking.last == (0.0, 0.0)
+        assert collector._armed
+        assert blocking.last == (0.2, 0.2)
     finally:
         if collector is not None:
             collector.close()

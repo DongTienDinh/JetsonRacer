@@ -11,7 +11,8 @@ Module nay co hai phan tach biet:
 An toan:
 
 * Mo camera khong tu dong khoi tao motor.
-* Chi ARM/test khi da tick xac nhan banh xe khong cham dat.
+* Chi cac nut TEST SERVO/MOTOR moi can xac nhan banh xe khong cham dat.
+* ARM lai bang tay cam hoat dong doc lap voi checkbox test phan cung.
 * Dead-man la tuy chon va mac dinh tat de tranh sai mapping nut gamepad.
 * DISARM / DUNG KHAN CAP luon gui steering=0, throttle=0.
 * Driver co watchdog cat ga neu UI khong gui lenh moi.
@@ -66,6 +67,22 @@ def apply_deadzone(value, deadzone):
         return 0.0
     shaped = (magnitude - deadzone) / (1.0 - deadzone)
     return shaped if value > 0 else -shaped
+
+
+def shape_throttle(value, deadzone, minimum, maximum):
+    """Anh xa can ga qua deadzone va bu nguong khoi dong cua dong co.
+
+    ``minimum`` la lenh nho nhat khi can da ra khoi deadzone. Xe khong co
+    encoder nen gia tri nay phai hieu chuan bang mat: tang dan den khi banh vua
+    bat dau quay. ``maximum`` van la gioi han tren de tranh xe vot toc.
+    """
+    shaped = apply_deadzone(value, deadzone)
+    if shaped == 0.0:
+        return 0.0
+    maximum = _clip(maximum, 0.0, 1.0)
+    minimum = _clip(minimum, 0.0, maximum)
+    magnitude = minimum + abs(shaped) * (maximum - minimum)
+    return magnitude if shaped > 0 else -magnitude
 
 
 def _safe_session_name(value):
@@ -233,8 +250,13 @@ class ManualDriveCollector(object):
         self.deadzone = widgets.FloatSlider(
             value=0.06, min=0.0, max=0.25, step=0.01,
             description='Deadzone:', readout_format='.2f')
+        self.min_throttle = widgets.FloatSlider(
+            value=float(self.cfg.get('manual.min_throttle', 0.12)),
+            min=0.0, max=0.30, step=0.01,
+            description='Ga khoi dong:', readout_format='.2f')
         self.max_throttle = widgets.FloatSlider(
-            value=0.20, min=0.05, max=0.40, step=0.01,
+            value=float(self.cfg.get('manual.max_throttle', 0.30)),
+            min=0.05, max=0.60, step=0.01,
             description='Ga toi da:', readout_format='.2f')
         self.save_hz = widgets.FloatSlider(
             value=5.0, min=1.0, max=20.0, step=1.0,
@@ -250,7 +272,8 @@ class ManualDriveCollector(object):
             value=0.45, min=0.10, max=0.75, step=0.05,
             description='Test lai:', readout_format='.2f')
         self.test_throttle = widgets.FloatSlider(
-            value=0.18, min=0.10, max=0.30, step=0.01,
+            value=float(self.cfg.get('manual.test_throttle', 0.25)),
+            min=0.10, max=0.50, step=0.01,
             description='Test ga:', readout_format='.2f')
 
         self.btn_probe = widgets.Button(
@@ -345,9 +368,13 @@ class ManualDriveCollector(object):
         driver_name = type(driver).__name__ if driver is not None else 'CHUA KET NOI'
         color = '#087f23' if driver is not None and self.driver_kind == 'nvidia' \
             else '#b26a00'
+        implementation = getattr(driver, 'implementation', '-')
+        gain = getattr(driver, 'throttle_gain', None)
+        gain_text = '-' if gain is None else '%.2f' % float(gain)
         return (
             '<b>Driver:</b> backend=<span style="color:%s">%s</span> &nbsp; '
-            'object=%s' % (color, self.driver_kind, driver_name))
+            'object=%s &nbsp; implementation=%s &nbsp; throttle_gain=%s' % (
+                color, self.driver_kind, driver_name, implementation, gain_text))
 
     def _controller_html(self):
         connected = bool(getattr(self.controller, 'connected', False))
@@ -428,12 +455,13 @@ class ManualDriveCollector(object):
         throttle_raw = float(self.controller.axes[throttle_index].value)
 
         steer = apply_deadzone(steer_raw, self.deadzone.value)
-        throttle = apply_deadzone(throttle_raw, self.deadzone.value)
+        throttle_input = -throttle_raw if self.invert_throttle.value \
+            else throttle_raw
+        throttle = shape_throttle(
+            throttle_input, self.deadzone.value,
+            self.min_throttle.value, self.max_throttle.value)
         if self.invert_steering.value:
             steer = -steer
-        if self.invert_throttle.value:
-            throttle = -throttle
-        throttle *= float(self.max_throttle.value)
 
         deadman = self._deadman_value()
         if not deadman:
@@ -636,11 +664,6 @@ class ManualDriveCollector(object):
                 'terminal: sudo systemctl restart nvargus-daemon')
 
     def _on_arm(self, _button=None):
-        if not self.wheels_lifted.value:
-            self._log(
-                'TU CHOI ARM: hay tick BANH XE DA KE KHOI MAT DAT.')
-            self._set_status('Tick xac nhan banh xe da ke truoc khi ARM')
-            return
         if self._actuator_test_running:
             self._log('Hay cho test actuator ket thuc roi moi ARM tay cam.')
             return
@@ -805,6 +828,7 @@ class ManualDriveCollector(object):
                 'invert_steering': bool(self.invert_steering.value),
                 'invert_throttle': bool(self.invert_throttle.value),
                 'deadzone': float(self.deadzone.value),
+                'min_throttle': float(self.min_throttle.value),
                 'max_throttle': float(self.max_throttle.value),
                 'use_deadman': bool(self.use_deadman.value),
                 'deadman_button': int(self.deadman_button.value),
@@ -850,15 +874,14 @@ class ManualDriveCollector(object):
         self._stop_recording()
 
     def _on_wheels_lifted_change(self, change):
-        """Checkbox la gate duy nhat: bo tick thi cat ga va DISARM ngay."""
+        """Bo tick chi dung bai test actuator; khong can thiep ARM lai that."""
         if bool(change.get('new', False)):
             return
-        if self._armed or self._actuator_test_running:
+        if self._actuator_test_running:
             self._actuator_stop_event.set()
-            self._armed = False
             self._zero_command()
-            self._set_status('DA BO TICK BANH XE -> CAT GA VA DISARM')
-            self._log('Bo tick BANH XE DA KE: da cat ga va DISARM.')
+            self._set_status('DA DUNG TEST ACTUATOR')
+            self._log('Bo tick BANH XE DA KE: da dung bai test actuator.')
 
     def _on_emergency(self, _button=None):
         self._actuator_stop_event.set()
@@ -882,15 +905,16 @@ class ManualDriveCollector(object):
     def widget(self):
         w = self.widgets
         warning = w.HTML(
-            '<b style="color:#b00020">BAT BUOC:</b> ke banh xe khoi mat dat '
-            'va tick xac nhan. Dead-man mac dinh tat. Nut DUNG KHAN CAP luon '
-            'cat ga va DISARM; watchdog tu cat ga neu mat lenh UI.')
+            '<b style="color:#b00020">AN TOAN:</b> checkbox ke banh chi bat '
+            'buoc khi TEST SERVO/MOTOR; khong dung checkbox nay de ARM lai '
+            'tren mat dat. Nut DUNG KHAN CAP luon cat ga va DISARM; watchdog '
+            'tu cat ga neu mat lenh UI.')
         settings1 = w.HBox([
             self.session_name, self.steering_axis, self.throttle_axis])
         settings2 = w.HBox([
             self.invert_steering, self.invert_throttle, self.deadzone])
         settings3 = w.HBox([
-            self.max_throttle, self.save_hz])
+            self.min_throttle, self.max_throttle, self.save_hz])
         hardware_test = w.VBox([
             w.HTML('<b>Test phan cung doc lap (chi khi xe da ke):</b>'),
             w.HBox([self.wheels_lifted, self.test_steering,
@@ -929,7 +953,7 @@ class ManualDriveCollector(object):
         self._ensure_control_thread()
         self._log(
             'Thu tu: KIEM TRA TAY CAM -> test actuator khi xe da ke -> '
-            'MO CAMERA (neu can ghi) -> tick BANH XE DA KE -> ARM -> GHI.')
+            'MO CAMERA (neu can ghi) -> dat xe xuong dat -> ARM -> GHI.')
         return self
 
     def close(self):

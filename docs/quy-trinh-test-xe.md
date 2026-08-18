@@ -143,11 +143,12 @@ jupyter notebook --ip=0.0.0.0 --port=8889 --no-browser
 Mở `collect_drive.ipynb` trong giao diện vừa khởi động và chạy từng cell từ trên
 xuống dưới.
 
-Notebook bắt buộc chạy camera check riêng trước khi tạo collector. Kết quả đúng
-phải có `Camera OK`, backend (`csi-gstreamer` hoặc `usb-v4l2-index-0`), FPS và
-ảnh `reports/camera_sample.jpg`. Nếu camera check lỗi thì không bỏ qua cell để
-ARM xe. Đóng mọi kernel/notebook camera cũ; chỉ khi camera đã được release mới
-thử `sudo systemctl restart nvargus-daemon`.
+Notebook bắt buộc chạy camera/driver check riêng trước khi tạo collector. Kết
+quả đúng phải có `Camera OK`, backend (`csi-gstreamer` hoặc
+`usb-v4l2-index-0`), FPS, ảnh `reports/camera_sample.jpg` và thông báo driver đã
+khởi tạo/ghi neutral. Nếu bước này lỗi thì không bỏ qua cell để ARM xe. Đóng mọi
+kernel/notebook camera cũ; chỉ khi camera đã được release mới thử
+`sudo systemctl restart nvargus-daemon`.
 
 Riêng lỗi `gstnvarguscamerasrc ... Failed to create CaptureSession` là lỗi
 Argus chưa tạo được phiên camera, không phải lỗi tay cầm. Làm đúng thứ tự:
@@ -166,9 +167,11 @@ của project cùng chiếm camera. Backend mặc định dùng trực tiếp Se
 PCA9685 `0x40`; class `NvidiaRacecar` của image không còn nằm trên đường chạy
 mặc định vì biến thể hai địa chỉ có thể xung đột trên board một PCA9685.
 
-Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → tick xác nhận xe đã kê →
-`TEST SERVO` → `TEST MOTOR 0.5S` → `MỞ CAMERA` → `ARM TAY CẦM` →
-`BẮT ĐẦU GHI`. Dead-man mặc định tắt; checkbox bánh đã kê là gate bắt buộc.
+Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → kê xe và tick xác nhận →
+`TEST SERVO` → `TEST MOTOR 0.5S` → `MỞ CAMERA` → đặt xe xuống đất →
+`ARM TAY CẦM` → `BẮT ĐẦU GHI`. Dead-man mặc định tắt; checkbox bánh đã kê chỉ
+là gate của hai nút test, không can thiệp ARM lái thật. `Ga khởi động` mặc định
+0.12 và `Ga tối đa` 0.30; hiệu chuẩn ngưỡng khởi động khi xe vẫn đang kê.
 Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping
 thật của từng loại tay cầm; không giả định mọi tay cầm đều là axes 2/1 và button
 4. Nút `DỪNG KHẨN CẤP` được tuần tự hóa với control loop: hủy bài test, dừng

@@ -54,7 +54,9 @@ def main(argv=None):
 
     p_run = sub.add_parser('run', help='Chay tren xe that')
     _add_common(p_run)
-    p_run.add_argument('--driver', choices=['dryrun', 'nvidia', 'ros'], default='dryrun')
+    p_run.add_argument(
+        '--driver', choices=['dryrun', 'nvidia', 'ros'], required=True,
+        help='Bat buoc chon ro; dung nvidia cho xe that, dryrun chi mo phong')
 
     p_replay = sub.add_parser('replay', help='Chay offline (video hoac anh tong hop)')
     _add_common(p_replay)

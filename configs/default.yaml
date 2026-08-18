@@ -30,6 +30,14 @@ pipeline:
   detect_hz: 10            # luồng detect chạy chậm hơn, kết quả được cache
   fps_window: 60           # số frame để tính FPS trung bình trượt
 
+# Lai tay de thu du lieu. min_throttle bu nguong chet co/ESC: khi can vua ra
+# khoi deadzone, lenh bat dau tu 0.12 va tang den 0.30. Hieu chuan tren xe da
+# ke: tang min_throttle dan den khi banh vua quay, khong tang tuy tien.
+manual:
+  min_throttle: 0.12
+  max_throttle: 0.30
+  test_throttle: 0.25
+
 lane:
   # ROI: chỉ lấy phần dưới ảnh (mặt đường ngay trước xe)
   roi_top: 0.55            # tỉ lệ chiều cao, tính từ trên xuống
@@ -65,7 +73,9 @@ control:
     # bien the NvidiaRacecar hai dia chi (0x40 + 0x60) giu motor sau exception.
     implementation: waveshare_single_pca
     i2c_address: 0x40
-    pwm_frequency: 60
+    # De trong de giu tan so mac dinh cua ServoKit/NvidiaRacecar (50 Hz).
+    # Chi dat 60 sau khi da do/kiem chung ESC va servo cua dung xe.
+    pwm_frequency:
     steering_channel: 0
     throttle_channel: 1
     # Vong UI gui 30 Hz. Neu mat lenh qua 0.8 s, watchdog tu ghi throttle=0.

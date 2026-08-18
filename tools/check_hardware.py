@@ -160,7 +160,7 @@ def check_camera(cfg, seconds, out_dir):
     return True
 
 
-def check_driver(kind):
+def check_driver(kind, cfg):
     step(4, 'Backend dieu khien')
     from jetracer_baseline.control import driver as driver_mod
 
@@ -184,6 +184,26 @@ def check_driver(kind):
             print('       Neu repo o noi khac:')
             print('         export JETRACER_NVIDIA_ROOT=/duong/dan/toi/jetracer')
         return False
+
+    # Import duoc thu vien chua co nghia la I2C/PCA9685 dung. Khoi tao driver
+    # that va ghi neutral de bat loi sai dia chi/quyen truy cap ngay o preflight.
+    from jetracer_baseline.control.driver import build_driver
+    drv = None
+    try:
+        drv = build_driver(kind, cfg)
+        drv.stop()
+    except Exception as exc:
+        print('')
+        print('%s Import duoc backend nhung khoi tao phan cung that bai: %s' %
+              (FAIL, exc))
+        return False
+    finally:
+        if drv is not None:
+            try:
+                drv.close()
+            except Exception:
+                pass
+    print('%s Da khoi tao driver va ghi neutral (steering=0, throttle=0).' % PASS)
     return True
 
 
@@ -271,7 +291,7 @@ def main(argv=None):
     else:
         results['camera'] = check_camera(cfg, args.camera_seconds, args.out)
 
-    results['driver'] = check_driver(args.driver)
+    results['driver'] = check_driver(args.driver, cfg)
 
     if args.actuator:
         results['actuator'] = check_actuator(args.driver, args.wheels_are_lifted, cfg)

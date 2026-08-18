@@ -193,7 +193,7 @@ class NvidiaJetRacerDriver(BaseDriver):
     def __init__(self, steering_gain=None, steering_offset=None,
                  throttle_gain=None, pulse_width_range=None,
                  i2c_address=None, i2c_address2=None,
-                 implementation='library', pwm_frequency=60,
+                 implementation='library', pwm_frequency=None,
                  steering_channel=0, throttle_channel=1,
                  command_timeout_s=0.8):
         self.implementation = implementation or 'library'
@@ -450,7 +450,7 @@ def build_driver(kind, cfg=None):
             pulse_width_range=cfg.get('control.driver.pulse_width_range'),
             i2c_address=cfg.get('control.driver.i2c_address'),
             i2c_address2=cfg.get('control.driver.i2c_address2'),
-            pwm_frequency=cfg.get('control.driver.pwm_frequency', 60),
+            pwm_frequency=cfg.get('control.driver.pwm_frequency'),
             steering_channel=cfg.get('control.driver.steering_channel', 0),
             throttle_channel=cfg.get('control.driver.throttle_channel', 1),
             command_timeout_s=cfg.get(
@@ -466,13 +466,13 @@ def probe():
     report = {}
     try:
         ServoKit = _load_servo_kit()
-        report['nvidia'] = 'OK - ServoKit/PCA9685 direct: %s' % (
+        report['nvidia'] = 'OK (chi moi truong) - ServoKit co san: %s' % (
             getattr(sys.modules.get(ServoKit.__module__), '__file__',
                     ServoKit.__module__),)
     except Exception as exc:
         try:
             _cls, module_path = _load_nvidia_racecar()
-            report['nvidia'] = 'OK - adapter du phong jetracer: %s' % module_path
+            report['nvidia'] = 'OK (chi moi truong) - jetracer co san: %s' % module_path
         except Exception as legacy_exc:
             report['nvidia'] = 'KHONG - ServoKit=%s; jetracer=%s' % (
                 exc, legacy_exc)
