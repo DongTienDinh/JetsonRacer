@@ -6,14 +6,15 @@ Module nay co hai phan tach biet:
 * ``DatasetSessionWriter`` ghi anh goc + CSV. Phan nay khong phu thuoc
   Jupyter va co the test tren laptop.
 * ``ManualDriveCollector`` tao ipywidgets Controller, xem truoc camera, gui
-  lenh toi NvidiaRacecar va dieu khien viec ghi du lieu.
+  lenh toi driver PCA9685 va dieu khien viec ghi du lieu.
 
 An toan:
 
 * Mo camera khong tu dong khoi tao motor.
-* Phai bam ARM moi gui lenh xuong xe.
-* Mac dinh phai GIU nut LB (button 4) thi throttle moi khac 0.
+* Chi ARM/test khi da tick xac nhan banh xe khong cham dat.
+* Dead-man la tuy chon va mac dinh tat de tranh sai mapping nut gamepad.
 * DISARM / DUNG KHAN CAP luon gui steering=0, throttle=0.
+* Driver co watchdog cat ga neu UI khong gui lenh moi.
 
 Python 3.6 compatible (Jetson Nano / JetPack 4.x).
 """
@@ -188,7 +189,7 @@ class DatasetSessionWriter(object):
 
 
 class ManualDriveCollector(object):
-    """UI Jupyter: preview camera, gamepad, NvidiaRacecar va recorder."""
+    """UI Jupyter: preview camera, gamepad, driver xe va recorder."""
 
     def __init__(self, config_path='configs/default.yaml', out_root='data/driving',
                  source_kind='csi', video_path=None, driver_kind='nvidia',
@@ -239,7 +240,7 @@ class ManualDriveCollector(object):
             value=5.0, min=1.0, max=20.0, step=1.0,
             description='Luu FPS:', readout_format='.0f')
         self.use_deadman = widgets.Checkbox(
-            value=True, description='Bat buoc giu dead-man')
+            value=False, description='Tuy chon dead-man')
         self.deadman_button = widgets.BoundedIntText(
             value=4, min=0, max=31, description='Nut dead-man:')
         self.wheels_lifted = widgets.Checkbox(
@@ -268,8 +269,8 @@ class ManualDriveCollector(object):
             description='DUNG GHI',
             layout=widgets.Layout(width='130px', height='38px'))
         self.btn_emergency = widgets.Button(
-            description='DUNG KHAN CAP', button_style='danger',
-            layout=widgets.Layout(width='180px', height='46px'))
+            description='DUNG KHAN CAP - CAT GA', button_style='danger',
+            layout=widgets.Layout(width='260px', height='52px'))
         self.btn_close = widgets.Button(
             description='DONG CAMERA',
             layout=widgets.Layout(width='150px', height='38px'))
@@ -293,6 +294,9 @@ class ManualDriveCollector(object):
         self.btn_disarm.on_click(self._on_disarm)
         self.btn_test_steering.on_click(self._on_test_steering)
         self.btn_test_motor.on_click(self._on_test_motor)
+        if hasattr(self.wheels_lifted, 'observe'):
+            self.wheels_lifted.observe(
+                self._on_wheels_lifted_change, names='value')
 
         self._grabber = None
         self._driver = None
@@ -303,6 +307,9 @@ class ManualDriveCollector(object):
         self._armed = False
         self._recording = False
         self._state_lock = threading.Lock()
+        # Tuan tu hoa moi lenh phan cung. Emergency se doi lenh dang ghi xong,
+        # sau do ghi ga=0 cuoi cung; control loop khong the ghi de len no.
+        self._driver_io_lock = threading.RLock()
         self._steering_raw = 0.0
         self._throttle_raw = 0.0
         self._steering_cmd = 0.0
@@ -318,12 +325,19 @@ class ManualDriveCollector(object):
         atexit.register(self.close)
 
     def _command_html(self):
+        use_deadman = bool(getattr(
+            getattr(self, 'use_deadman', None), 'value', False))
+        if not use_deadman:
+            deadman_text = 'KHONG BAT BUOC'
+        else:
+            deadman_text = 'ON' if getattr(
+                self, '_deadman_pressed', False) else 'OFF'
         return (
             '<b>Lenh gui xuong xe:</b> steering=%+.3f &nbsp; throttle=%+.3f '
             '&nbsp; dead-man=%s &nbsp; armed=%s' % (
                 getattr(self, '_steering_cmd', 0.0),
                 getattr(self, '_throttle_cmd', 0.0),
-                'ON' if getattr(self, '_deadman_pressed', False) else 'OFF',
+                deadman_text,
                 'YES' if getattr(self, '_armed', False) else 'NO'))
 
     def _driver_html(self):
@@ -386,7 +400,8 @@ class ManualDriveCollector(object):
     def _ensure_driver(self):
         if self._driver is None:
             self._driver = build_driver(self.driver_kind, self.cfg)
-            self._driver.stop()
+            with self._driver_io_lock:
+                self._driver.stop()
             self.driver_view.value = self._driver_html()
             self._log('Driver da ket noi: backend=%s, object=%s' % (
                 self.driver_kind, type(self._driver).__name__))
@@ -399,9 +414,12 @@ class ManualDriveCollector(object):
         if len(self.controller.buttons) <= index:
             return False
         button = self.controller.buttons[index]
-        if hasattr(button, 'pressed'):
-            return bool(button.pressed)
-        return float(getattr(button, 'value', 0.0)) > 0.5
+        pressed = bool(getattr(button, 'pressed', False))
+        try:
+            value = float(getattr(button, 'value', 0.0))
+        except (TypeError, ValueError):
+            value = 0.0
+        return pressed or value > 0.5
 
     def _read_controller_command(self):
         steer_index = int(self.steering_axis.value)
@@ -423,17 +441,21 @@ class ManualDriveCollector(object):
         return steer_raw, throttle_raw, steer, throttle, deadman
 
     def _zero_command(self):
+        stop_error = None
+        with self._driver_io_lock:
+            if self._driver is not None:
+                try:
+                    self._driver.stop()
+                except Exception as exc:
+                    stop_error = exc
         with self._state_lock:
             self._steering_raw = 0.0
             self._throttle_raw = 0.0
             self._steering_cmd = 0.0
             self._throttle_cmd = 0.0
             self._deadman_pressed = False
-        if self._driver is not None:
-            try:
-                self._driver.stop()
-            except Exception as exc:
-                self._log('Khong gui duoc lenh stop: %s' % exc)
+        if stop_error is not None:
+            self._log('Khong gui duoc lenh stop: %s' % stop_error)
         self.command_view.value = self._command_html()
 
     def _control_loop(self):
@@ -459,13 +481,18 @@ class ManualDriveCollector(object):
                 continue
             try:
                 values = self._read_controller_command()
+                with self._driver_io_lock:
+                    # Kiem tra lai ben trong lock: emergency co the da DISARM
+                    # sau lan kiem tra o dau vong lap.
+                    if not self._armed or self._actuator_test_running:
+                        continue
+                    self._driver.set(values[2], values[3])
                 with self._state_lock:
                     self._steering_raw = values[0]
                     self._throttle_raw = values[1]
                     self._steering_cmd = values[2]
                     self._throttle_cmd = values[3]
                     self._deadman_pressed = values[4]
-                self._driver.set(values[2], values[3])
             except Exception as exc:
                 self._log('Loi dieu khien -> DISARM: %s' % exc)
                 self._armed = False
@@ -609,8 +636,18 @@ class ManualDriveCollector(object):
                 'terminal: sudo systemctl restart nvargus-daemon')
 
     def _on_arm(self, _button=None):
-        if self._grabber is None:
-            self._log('Hay MO CAMERA va kiem tra hinh truoc khi ARM.')
+        if not self.wheels_lifted.value:
+            self._log(
+                'TU CHOI ARM: hay tick BANH XE DA KE KHOI MAT DAT.')
+            self._set_status('Tick xac nhan banh xe da ke truoc khi ARM')
+            return
+        if self._actuator_test_running:
+            self._log('Hay cho test actuator ket thuc roi moi ARM tay cam.')
+            return
+        if not self._controller_ready():
+            self._log(
+                'Tay cam chua san sang. Bam/xoay cac can, sau do kiem tra '
+                'connected va so truc.')
             return
         try:
             steer_raw = float(
@@ -626,11 +663,6 @@ class ManualDriveCollector(object):
                 '(steer=%+.2f, throttle=%+.2f).' % (steer_raw, throttle_raw))
             self._set_status('Hay tha hai can gat ve vi tri giua roi ARM lai')
             return
-        if not self._controller_ready():
-            self._log(
-                'Tay cam chua san sang. Bam/xoay cac can, sau do kiem tra '
-                'connected va so truc.')
-            return
         if self.use_deadman.value and \
                 len(self.controller.buttons) <= int(self.deadman_button.value):
             self._log('Tay cam khong co button %d. Chon lai nut dead-man.' %
@@ -638,12 +670,14 @@ class ManualDriveCollector(object):
             return
         try:
             self._ensure_driver()
-            self._armed = True
+            with self._driver_io_lock:
+                self._driver.stop()
+                self._armed = True
             if self.use_deadman.value:
                 requirement = 'giu button %d de co ga' % int(
                     self.deadman_button.value)
             else:
-                requirement = 'dead-man DANG TAT'
+                requirement = 'khong can giu dead-man'
             self._set_status('DA ARM; %s' % requirement)
             self._log(
                 'ARM OK: driver=%s, steering=axis[%d], throttle=axis[%d], '
@@ -698,6 +732,7 @@ class ManualDriveCollector(object):
                 self.driver_kind)
         self._armed = False
         self._zero_command()
+        self._log('Test actuator se DISARM tay cam trong luc test.')
         return driver
 
     def _run_actuator_test(self, kind):
@@ -706,6 +741,13 @@ class ManualDriveCollector(object):
             return
         self._actuator_test_running = True
         self._actuator_stop_event.clear()
+
+        def test_set(steering, throttle):
+            with self._driver_io_lock:
+                if self._actuator_stop_event.is_set():
+                    return False
+                driver.set(steering, throttle)
+                return True
 
         def worker():
             try:
@@ -716,26 +758,24 @@ class ManualDriveCollector(object):
                     for steering in (-value, 0.0, value, 0.0):
                         if self._actuator_stop_event.is_set():
                             break
-                        driver.set(steering, 0.0)
+                        if not test_set(steering, 0.0):
+                            break
                         if self._actuator_stop_event.wait(0.7):
                             break
                     self._log('TEST SERVO xong: bien do +/-%0.2f' % value)
                 else:
                     value = float(self.test_throttle.value)
                     self._set_status('DANG TEST MOTOR 0.5 GIAY')
-                    driver.set(0.0, value)
+                    test_set(0.0, value)
                     self._actuator_stop_event.wait(0.5)
                     self._log('TEST MOTOR xong: throttle=+%.2f trong 0.5 s' % value)
             except Exception as exc:
                 self._log('LOI TEST ACTUATOR: %s' % exc)
             finally:
-                try:
-                    driver.stop()
-                except Exception:
-                    pass
                 self._actuator_test_running = False
                 self._zero_command()
-                self._set_status('TEST XONG; xe dang DISARM')
+                self._set_status(
+                    'TEST XONG; ga=0. Bam ARM neu muon lai bang tay cam')
 
         self._actuator_thread = threading.Thread(target=worker)
         self._actuator_thread.daemon = True
@@ -809,18 +849,29 @@ class ManualDriveCollector(object):
     def _on_stop_recording(self, _button=None):
         self._stop_recording()
 
+    def _on_wheels_lifted_change(self, change):
+        """Checkbox la gate duy nhat: bo tick thi cat ga va DISARM ngay."""
+        if bool(change.get('new', False)):
+            return
+        if self._armed or self._actuator_test_running:
+            self._actuator_stop_event.set()
+            self._armed = False
+            self._zero_command()
+            self._set_status('DA BO TICK BANH XE -> CAT GA VA DISARM')
+            self._log('Bo tick BANH XE DA KE: da cat ga va DISARM.')
+
     def _on_emergency(self, _button=None):
         self._actuator_stop_event.set()
-        self._stop_recording()
         self._armed = False
+        self._stop_recording()
         self._zero_command()
         self._set_status('DUNG KHAN CAP - motor=0, steering=0')
         self._log('DUNG KHAN CAP: da DISARM xe.')
 
     def _on_disarm(self, _button=None):
         self._actuator_stop_event.set()
-        self._stop_recording()
         self._armed = False
+        self._stop_recording()
         self._zero_command()
         self._set_status('DA DISARM - motor=0, steering=0')
         self._log('Da DISARM xe.')
@@ -831,16 +882,15 @@ class ManualDriveCollector(object):
     def widget(self):
         w = self.widgets
         warning = w.HTML(
-            '<b style="color:#b00020">AN TOAN:</b> lan dau ke banh xe khoi mat '
-            'dat. Mac dinh phai GIU LB/button 4 thi xe moi co ga. Nut do khan '
-            'cap vat ly/nguoi bat xe van bat buoc.')
+            '<b style="color:#b00020">BAT BUOC:</b> ke banh xe khoi mat dat '
+            'va tick xac nhan. Dead-man mac dinh tat. Nut DUNG KHAN CAP luon '
+            'cat ga va DISARM; watchdog tu cat ga neu mat lenh UI.')
         settings1 = w.HBox([
             self.session_name, self.steering_axis, self.throttle_axis])
         settings2 = w.HBox([
             self.invert_steering, self.invert_throttle, self.deadzone])
         settings3 = w.HBox([
-            self.max_throttle, self.save_hz,
-            self.use_deadman, self.deadman_button])
+            self.max_throttle, self.save_hz])
         hardware_test = w.VBox([
             w.HTML('<b>Test phan cung doc lap (chi khi xe da ke):</b>'),
             w.HBox([self.wheels_lifted, self.test_steering,
@@ -853,6 +903,7 @@ class ManualDriveCollector(object):
             self.btn_stop_record, self.btn_disarm, self.btn_close])
         return w.VBox([
             warning,
+            self.btn_emergency,
             w.HTML('<b>Tay cam (bam nut/xoay can de trinh duyet nhan):</b>'),
             self.controller,
             self.controller_view,
@@ -862,7 +913,6 @@ class ManualDriveCollector(object):
             hardware_test,
             buttons,
             stop_buttons,
-            self.btn_emergency,
             self.status,
             self.driver_view,
             self.command_view,
@@ -879,7 +929,7 @@ class ManualDriveCollector(object):
         self._ensure_control_thread()
         self._log(
             'Thu tu: KIEM TRA TAY CAM -> test actuator khi xe da ke -> '
-            'MO CAMERA -> ARM -> giu dead-man -> GHI.')
+            'MO CAMERA (neu can ghi) -> tick BANH XE DA KE -> ARM -> GHI.')
         return self
 
     def close(self):
@@ -887,8 +937,8 @@ class ManualDriveCollector(object):
             return
         self._closed = True
         self._actuator_stop_event.set()
-        self._stop_recording()
         self._armed = False
+        self._stop_recording()
         self._zero_command()
         self._stop_event.set()
 

@@ -132,8 +132,10 @@ pip install "ipywidgets>=7.5,<8" "traitlets>=4.3"
 
 Giao diện đi theo thứ tự `KIỂM TRA TAY CẦM → TEST SERVO/MOTOR khi xe đã kê →
 MỞ CAMERA → ARM TAY CẦM → BẮT ĐẦU GHI`.
-Mặc định phải giữ nút `LB` (`button 4`) thì xe mới nhận ga và ga bị giới hạn ở
-`0.20`. Mỗi session được lưu riêng tại `data/driving/<session_timestamp>/` gồm
+Chỉ có một gate bắt buộc: tick `BÁNH XE ĐÃ KÊ KHỎI MẶT ĐẤT` trước khi test
+hoặc ARM. Dead-man mặc định tắt; ga vẫn bị giới hạn ở `0.20`. Bỏ tick trong lúc
+đang chạy sẽ cắt ga và DISARM ngay. Mỗi session được lưu riêng tại
+`data/driving/<session_timestamp>/` gồm
 ảnh gốc, `labels.csv` và `metadata.json`. Với dataset segmentation bài 1, để
 `Lưu FPS = 5`; nếu sau này train imitation learning thì tăng lên 15–20 FPS.
 
@@ -159,22 +161,22 @@ sleep 2
 python3 tools/check_hardware.py --driver nvidia --camera-seconds 3
 ```
 
-Backend `nvidia` tự tìm NVIDIA JetRacer tại `~/jetracer` và
-`/home/jetson/jetracer`. Nếu repo nằm nơi khác, đặt
-`JETRACER_NVIDIA_ROOT=/duong/dan/toi/jetracer` trước khi chạy Jupyter.
+Backend mặc định không còn phụ thuộc class `NvidiaRacecar` đã cài trong image;
+nó dùng thẳng `adafruit_servokit` vốn có sẵn trên image JetRacer. Adapter thư
+viện cũ chỉ còn là đường dự phòng khi đổi `control.driver.implementation`.
 
-Nếu giao diện báo `No I2C device at address: 0x60`, code sẽ truyền cả hai
-tham số địa chỉ về `0x40` theo cấu hình JetRacer Pro/Waveshare. Tắt kernel
-Jupyter cũ rồi chạy lại notebook. Nếu vẫn lỗi, kiểm tra phần cứng trước:
+Backend `nvidia` của project điều khiển trực tiếp PCA9685 duy nhất ở `0x40`,
+channel 0 cho lái và channel 1 cho ga; không còn tạo object motor `0x60` từ
+biến thể thư viện cũ. Driver có watchdog: mất lệnh UI quá 0.8 giây thì tự ghi
+ga về 0. Tắt kernel Jupyter cũ rồi chạy lại notebook sau mỗi lần cập nhật code.
+Nếu không kết nối được driver, kiểm tra phần cứng trước:
 
 ```bash
 sudo i2cdetect -y -r 1
 ```
 
 Kết quả phải có `40`. Nếu không có `40`, đây là lỗi nguồn/cáp/tiếp xúc I²C,
-không phải lỗi tay cầm hay camera. Nếu có `40` nhưng driver vẫn gọi `0x60`,
-image đang cài sai biến thể thư viện; làm theo hướng dẫn Waveshare để chuyển
-repo `jetracer` sang nhánh `ws/pro`, cài lại và khởi động lại kernel.
+không phải lỗi tay cầm hay camera.
 
 Chạy thử giao diện bằng video trên laptop, hoàn toàn không điều khiển motor:
 
@@ -195,6 +197,6 @@ collector = launch(source_kind='video', video_path='raw_camera.avi',
 | FSM Smart City | Chạy được, có test cho đèn đỏ/xanh và biển lệnh |
 | Nhận diện biển báo | **Chỉ có backend `stub`** — cần dataset + train YOLO (phase P2) |
 | Log + phân tích | Hoàn chỉnh, đúng schema ĐB §7 |
-| Driver phần cứng | **Đã chốt: `nvidia`** (`NvidiaRacecar`, `steering_gain=-1.0`) — theo `control.txt` của BTC. Vẫn nên chạy `probe` ngày đầu có xe để xác nhận thư viện có sẵn |
+| Driver phần cứng | **Đã chốt: PCA9685 `0x40` trực tiếp qua ServoKit**, channel lái/ga `0/1`, có emergency lock + watchdog |
 
 Hai việc chặn tiến độ, theo thứ tự: **(1)** quay video sa bàn để dev offline, **(2)** thu dataset biển báo.

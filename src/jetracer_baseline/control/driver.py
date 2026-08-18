@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """Adapter dieu khien chap hanh (servo lai + motor).
 
-Backend DA CHOT la `nvidia` - theo `control.txt` cua BTC (dung thu vien
-NVIDIA jetracer, `NvidiaRacecar`, `steering_gain = -1.0`). `ros` van duoc
-giu lai o day phong khi image doi khac, nhung KHONG phai duong mac dinh nua:
+Backend DA CHOT la `nvidia`. Voi config mac dinh, ten backend nay dung ServoKit
+truc tiep tren PCA9685 0x40 cua Waveshare (channel 0 lai, channel 1 ga), khong
+di qua bien the NvidiaRacecar hai dia chi cua image. `ros` va adapter thu vien
+cu van duoc giu lai lam du phong:
 
-  1. `nvidia_jetracer` : thu vien NVIDIA jetracer (DA CHOT, dung backend nay)
-        from jetracer.nvidia_racecar import NvidiaRacecar
-        car.steering = x ; car.throttle = y
+  1. `nvidia`          : ServoKit/PCA9685 0x40 truc tiep (mac dinh)
   2. `ros`             : ban ROS cua Waveshare, publish geometry_msgs/Twist len /cmd_vel - du phong, chua dung
   3. `dryrun`          : khong dieu khien gi, chi ghi log (dev tren laptop)
 
@@ -22,6 +21,8 @@ Quy uoc chung:
 import importlib
 import os
 import sys
+import threading
+import time
 
 
 def _nvidia_repo_candidates():
@@ -74,6 +75,12 @@ def _load_nvidia_racecar():
         'Khong import duoc jetracer.nvidia_racecar: %s. Da tim: %s. '
         'Neu repo nam noi khac, dat JETRACER_NVIDIA_ROOT=/duong/dan/toi/repo.' %
         (first_error, ', '.join(tried) if tried else '(khong tim thay repo)'))
+
+
+def _load_servo_kit():
+    """Nap ServoKit rieng de co the test driver tren laptop bang fake class."""
+    from adafruit_servokit import ServoKit
+    return ServoKit
 
 
 def _clip(value, low, high):
@@ -165,17 +172,68 @@ class DryRunDriver(BaseDriver):
 
 
 class NvidiaJetRacerDriver(BaseDriver):
-    """`None` o bat ky tham so nao nghia la "khong dung toi thuoc tinh do" -
-    giu nguyen mac dinh cua thu vien jetracer, KHONG phai ep ve 0.
+    """Driver cho JetRacer, co hai implementation.
+
+    ``waveshare_single_pca`` dieu khien truc tiep PCA9685 duy nhat o 0x40 bang
+    ServoKit: channel 0 lai, channel 1 ga. Day la duong mac dinh cho xe cua BTC.
+    No khong dung bien the NvidiaRacecar hai dia chi (0x40 + 0x60), vi ep ca
+    hai object do vao 0x40 lam hai driver tranh chap tan so/channel va co the
+    khien motor chay lien tuc sau loi ``Out of range``.
+
+    ``library`` giu adapter NvidiaRacecar cu lam du phong cho image khac.
 
     steering_gain/offset/throttle_gain: xem BASELINE.md / control.txt cua BTC
     de biet gia tri chot cho ngay thi. pulse_width_range: (low, high) truyen
     thang cho `steering_motor.set_pulse_width_range`, hoac None de khong goi.
+
+    Moi lenh phai duoc lam moi truoc ``command_timeout_s``. Neu thread UI bi
+    dung, watchdog ghi ga=0 truc tiep, khong cho xe giu lenh cu vo thoi han.
     """
 
     def __init__(self, steering_gain=None, steering_offset=None,
                  throttle_gain=None, pulse_width_range=None,
-                 i2c_address=None, i2c_address2=None):
+                 i2c_address=None, i2c_address2=None,
+                 implementation='library', pwm_frequency=60,
+                 steering_channel=0, throttle_channel=1,
+                 command_timeout_s=0.8):
+        self.implementation = implementation or 'library'
+        self._io_lock = threading.RLock()
+        self._watchdog_stop = threading.Event()
+        self._watchdog_thread = None
+        self._last_command_time = None
+        self._closed = False
+        self.command_timeout_s = max(0.0, float(command_timeout_s or 0.0))
+
+        if self.implementation == 'waveshare_single_pca':
+            self._init_waveshare_single_pca(
+                steering_gain=steering_gain,
+                steering_offset=steering_offset,
+                throttle_gain=throttle_gain,
+                pulse_width_range=pulse_width_range,
+                i2c_address=i2c_address,
+                pwm_frequency=pwm_frequency,
+                steering_channel=steering_channel,
+                throttle_channel=throttle_channel)
+        elif self.implementation == 'library':
+            self._init_library(
+                steering_gain=steering_gain,
+                steering_offset=steering_offset,
+                throttle_gain=throttle_gain,
+                pulse_width_range=pulse_width_range,
+                i2c_address=i2c_address,
+                i2c_address2=i2c_address2)
+        else:
+            raise ValueError('implementation driver khong hop le: %s' %
+                             self.implementation)
+
+        if self.command_timeout_s > 0.0:
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop, name='jetracer-driver-watchdog')
+            self._watchdog_thread.daemon = True
+            self._watchdog_thread.start()
+
+    def _init_library(self, steering_gain, steering_offset, throttle_gain,
+                      pulse_width_range, i2c_address, i2c_address2):
         NvidiaRacecar, module_path = _load_nvidia_racecar()
 
         print('[driver] NvidiaRacecar: %s' % module_path)
@@ -209,9 +267,148 @@ class NvidiaJetRacerDriver(BaseDriver):
         if throttle_gain is not None:
             self.car.throttle_gain = throttle_gain
 
+    def _init_waveshare_single_pca(self, steering_gain, steering_offset,
+                                   throttle_gain, pulse_width_range,
+                                   i2c_address, pwm_frequency,
+                                   steering_channel, throttle_channel):
+        ServoKit = _load_servo_kit()
+        address = 0x40 if i2c_address is None else int(i2c_address)
+        self.steering_gain = -0.65 if steering_gain is None \
+            else float(steering_gain)
+        self.steering_offset = 0.0 if steering_offset is None \
+            else float(steering_offset)
+        self.throttle_gain = 0.8 if throttle_gain is None \
+            else float(throttle_gain)
+        self.steering_channel = int(steering_channel)
+        self.throttle_channel = int(throttle_channel)
+
+        print('[driver] Waveshare single PCA9685: address=%s, steering=ch%d, '
+              'throttle=ch%d' % (
+                  _format_i2c_address(address), self.steering_channel,
+                  self.throttle_channel))
+        self.kit = ServoKit(channels=16, address=address)
+        if pwm_frequency is not None:
+            self.kit._pca.frequency = int(pwm_frequency)
+            print('[driver] PCA9685 frequency=%d Hz' % int(pwm_frequency))
+        self.steering_motor = self.kit.continuous_servo[
+            self.steering_channel]
+        self.throttle_motor = self.kit.continuous_servo[
+            self.throttle_channel]
+
+        if pulse_width_range is not None:
+            self.steering_motor.set_pulse_width_range(*pulse_width_range)
+            print('[driver] set_pulse_width_range%r : OK' %
+                  (tuple(pulse_width_range),))
+
+        # Ghi neutral ngay sau khoi tao, truoc khi bat dau watchdog/UI.
+        with self._io_lock:
+            self._force_stop_direct_locked()
+
+    def _force_stop_direct_locked(self):
+        """Cat ga truoc, sau do moi dua lai ve giua."""
+        throttle_error = None
+        try:
+            self.throttle_motor.throttle = 0.0
+        except Exception as exc:
+            throttle_error = exc
+        try:
+            self.steering_motor.throttle = _clip(
+                self.steering_offset, -1.0, 1.0)
+        except Exception:
+            if throttle_error is None:
+                raise
+        if throttle_error is not None:
+            raise throttle_error
+
+    def _set_direct_locked(self, steering, throttle):
+        steering_output = _clip(
+            float(steering) * self.steering_gain + self.steering_offset,
+            -1.0, 1.0)
+        throttle_output = _clip(
+            float(throttle) * self.throttle_gain, -1.0, 1.0)
+        try:
+            # Chi cap ga sau khi lenh lai hop le da duoc ghi.
+            self.steering_motor.throttle = steering_output
+            self.throttle_motor.throttle = throttle_output
+        except Exception:
+            # Bat ky loi nao cung phai thu cat ga truoc khi day exception len UI.
+            try:
+                self._force_stop_direct_locked()
+            except Exception:
+                pass
+            raise
+
+    def _stop_locked(self):
+        if self.implementation == 'waveshare_single_pca':
+            self._force_stop_direct_locked()
+        else:
+            # Ga ve 0 truoc. Khong dung BaseDriver.stop() de tranh mot observer
+            # steering loi lam bo qua lenh cat ga.
+            self.car.throttle = 0.0
+            self.car.steering = 0.0
+
+    def _watchdog_loop(self):
+        interval = min(0.10, max(0.02, self.command_timeout_s / 4.0))
+        while not self._watchdog_stop.wait(interval):
+            expired = False
+            stop_error = None
+            with self._io_lock:
+                if self._last_command_time is not None and \
+                        (time.monotonic() - self._last_command_time) > \
+                        self.command_timeout_s:
+                    expired = True
+                    try:
+                        self._stop_locked()
+                    except Exception as exc:
+                        # Giu timestamp qua han de vong sau thu cat ga lai.
+                        stop_error = exc
+                    else:
+                        self._last_command_time = None
+            if expired:
+                if stop_error is None:
+                    print('[driver] WATCHDOG: mat lenh %.2f s -> throttle=0' %
+                          self.command_timeout_s)
+                else:
+                    print('[driver] WATCHDOG: LOI cat ga, se thu lai: %s' %
+                          stop_error)
+
     def set(self, steering, throttle):
-        self.car.steering = _clip(steering, -1.0, 1.0)
-        self.car.throttle = _clip(throttle, -1.0, 1.0)
+        with self._io_lock:
+            if self._closed:
+                raise RuntimeError('Driver da dong')
+            steering = _clip(float(steering), -1.0, 1.0)
+            throttle = _clip(float(throttle), -1.0, 1.0)
+            if self.implementation == 'waveshare_single_pca':
+                self._set_direct_locked(steering, throttle)
+            else:
+                self.car.steering = steering
+                self.car.throttle = throttle
+            self._last_command_time = time.monotonic()
+
+    def stop(self):
+        with self._io_lock:
+            try:
+                self._stop_locked()
+            except Exception:
+                # Buoc watchdog vao trang thai qua han de no tiep tuc thu cat
+                # ga neu loi I2C chi la tam thoi.
+                if self.command_timeout_s > 0.0:
+                    self._last_command_time = (
+                        time.monotonic() - self.command_timeout_s - 1.0)
+                raise
+            else:
+                self._last_command_time = None
+
+    def close(self):
+        try:
+            self.stop()
+        finally:
+            with self._io_lock:
+                self._closed = True
+            self._watchdog_stop.set()
+            if self._watchdog_thread is not None and \
+                    self._watchdog_thread is not threading.current_thread():
+                self._watchdog_thread.join(timeout=1.0)
 
 
 class RosCmdVelDriver(BaseDriver):
@@ -245,12 +442,19 @@ def build_driver(kind, cfg=None):
         if cfg is None:
             return NvidiaJetRacerDriver()
         return NvidiaJetRacerDriver(
+            implementation=cfg.get(
+                'control.driver.implementation', 'library'),
             steering_gain=cfg.get('control.driver.steering_gain'),
             steering_offset=cfg.get('control.driver.steering_offset'),
             throttle_gain=cfg.get('control.driver.throttle_gain'),
             pulse_width_range=cfg.get('control.driver.pulse_width_range'),
             i2c_address=cfg.get('control.driver.i2c_address'),
             i2c_address2=cfg.get('control.driver.i2c_address2'),
+            pwm_frequency=cfg.get('control.driver.pwm_frequency', 60),
+            steering_channel=cfg.get('control.driver.steering_channel', 0),
+            throttle_channel=cfg.get('control.driver.throttle_channel', 1),
+            command_timeout_s=cfg.get(
+                'control.driver.command_timeout_s', 0.8),
         )
     if kind == 'ros':
         return RosCmdVelDriver()
@@ -261,10 +465,17 @@ def probe():
     """Bao cao backend nao kha dung tren may hien tai."""
     report = {}
     try:
-        _cls, module_path = _load_nvidia_racecar()
-        report['nvidia'] = 'OK - thu vien jetracer: %s' % module_path
+        ServoKit = _load_servo_kit()
+        report['nvidia'] = 'OK - ServoKit/PCA9685 direct: %s' % (
+            getattr(sys.modules.get(ServoKit.__module__), '__file__',
+                    ServoKit.__module__),)
     except Exception as exc:
-        report['nvidia'] = 'KHONG - ' + str(exc)
+        try:
+            _cls, module_path = _load_nvidia_racecar()
+            report['nvidia'] = 'OK - adapter du phong jetracer: %s' % module_path
+        except Exception as legacy_exc:
+            report['nvidia'] = 'KHONG - ServoKit=%s; jetracer=%s' % (
+                exc, legacy_exc)
     try:
         import rospy  # noqa
         import geometry_msgs.msg  # noqa

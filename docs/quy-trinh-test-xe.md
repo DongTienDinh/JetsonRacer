@@ -162,16 +162,19 @@ python3 tools/check_hardware.py --driver nvidia --camera-seconds 3
 
 Không chạy đồng thời lệnh trên và nút `MỞ CAMERA`. Mã mới dùng capture mode
 `1280x720@30`, retry Argus một lần và khóa liên tiến trình để tránh hai collector
-của project cùng chiếm camera. Nếu backend NVIDIA báo thiếu module nhưng máy đã
-có `/home/jetson/jetracer/jetracer/nvidia_racecar.py`, mã sẽ tự thêm repo đó
-vào Python path. Repo ở vị trí khác thì export `JETRACER_NVIDIA_ROOT`.
+của project cùng chiếm camera. Backend mặc định dùng trực tiếp ServoKit trên
+PCA9685 `0x40`; class `NvidiaRacecar` của image không còn nằm trên đường chạy
+mặc định vì biến thể hai địa chỉ có thể xung đột trên board một PCA9685.
 
-Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → xác nhận xe đã kê → `TEST SERVO` →
-`TEST MOTOR 0.5S` → `MỞ CAMERA` → `ARM TAY CẦM` → giữ đúng nút dead-man →
-`BẮT ĐẦU GHI`. Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping
+Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → tick xác nhận xe đã kê →
+`TEST SERVO` → `TEST MOTOR 0.5S` → `MỞ CAMERA` → `ARM TAY CẦM` →
+`BẮT ĐẦU GHI`. Dead-man mặc định tắt; checkbox bánh đã kê là gate bắt buộc.
+Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping
 thật của từng loại tay cầm; không giả định mọi tay cầm đều là axes 2/1 và button
-4. Nút `DỪNG KHẨN CẤP` hủy cả bài test actuator đang chạy, dừng ghi, đưa ga/lái
-về 0 rồi DISARM. Dữ liệu nằm trong `data/driving/<session_timestamp>/`; không
+4. Nút `DỪNG KHẨN CẤP` được tuần tự hóa với control loop: hủy bài test, dừng
+ghi, ghi ga=0 rồi DISARM; control loop không thể ghi đè lệnh ga sau emergency.
+Watchdog cũng tự cắt ga nếu mất lệnh quá 0.8 giây. Dữ liệu nằm trong
+`data/driving/<session_timestamp>/`; không
 chia ngẫu nhiên frame của cùng session sang cả train và validation.
 
 Đây là thứ cho phép cả đội làm việc offline suốt tuần sau mà không cần tranh xe.
@@ -235,7 +238,7 @@ Lý do phải chọn theo điểm mô phỏng: nhanh hơn 10 giây được **2 
 | Triệu chứng | Nguyên nhân thường gặp |
 |---|---|
 | `No module named 'jetracer.nvidia_racecar'` | Repo NVIDIA chưa nằm trong Python path; kiểm tra `~/jetracer/jetracer/nvidia_racecar.py` hoặc đặt `JETRACER_NVIDIA_ROOT` |
-| `No I2C device at address: 0x60` | JetRacer Pro dùng `0x40`; cập nhật code/config mới nhất, restart kernel, rồi chạy `sudo i2cdetect -y -r 1`. Không thấy `40` thì kiểm tra nguồn/cáp I²C; thấy `40` mà vẫn gọi `60` thì cài đúng nhánh Waveshare `ws/pro` |
+| `No I2C device at address: 0x60` | Đang chạy code/kernel cũ. Backend mới chỉ dùng PCA9685 `0x40`; pull code, Shut Down toàn bộ kernel rồi chạy lại. Không thấy `40` trong `sudo i2cdetect -y -r 1` thì kiểm tra nguồn/cáp I²C |
 | `Failed to create CaptureSession` / camera 0 frame | Đóng mọi kernel camera, restart `nvargus-daemon`; nếu vẫn lỗi thì tắt nguồn và kiểm tra chiều cáp CSI |
 | FPS tụt dần theo thời gian | Jetson bị throttle nhiệt — kiểm tra `tegrastats`, bật quạt |
 | Xe rẽ ngược hướng | Sai dấu `steering` (bước 4) hoặc sai dấu `cte` (bước 5) |

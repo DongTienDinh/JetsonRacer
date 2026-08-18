@@ -12,6 +12,7 @@ import csv
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import types
 
@@ -47,8 +48,11 @@ def test_config_loads():
     cfg = load_config(CONFIG)
     assert cfg.get('control.v_max') > 0
     assert cfg.get('pipeline.control_hz') >= 20
+    assert cfg.get('control.driver.implementation') == 'waveshare_single_pca'
     assert cfg.get('control.driver.i2c_address') == 0x40
-    assert cfg.get('control.driver.i2c_address2') == 0x40
+    assert cfg.get('control.driver.steering_channel') == 0
+    assert cfg.get('control.driver.throttle_channel') == 1
+    assert cfg.get('control.driver.command_timeout_s') > 0
     # Doc override phai ghi de dung, khong lam mat khoa khac
     cfg2 = load_config(CONFIG, [os.path.join(ROOT, 'configs', 'fast.yaml')])
     assert cfg2.get('control.v_max') > cfg.get('control.v_max')
@@ -307,6 +311,82 @@ def test_nvidia_driver_wraps_wrong_0x60_with_actionable_error():
         driver_mod._load_nvidia_racecar = original_loader
 
 
+def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
+    """Driver 0x40 phai cat ga truc tiep va khong giu lenh cu qua timeout."""
+    class FakeServo(object):
+        def __init__(self):
+            self.history = []
+            self.pulse_range = None
+
+        @property
+        def throttle(self):
+            return self.history[-1] if self.history else None
+
+        @throttle.setter
+        def throttle(self, value):
+            value = float(value)
+            if value < -1.0 or value > 1.0:
+                raise ValueError('Out of range')
+            self.history.append(value)
+
+        def set_pulse_width_range(self, low, high):
+            self.pulse_range = (low, high)
+
+    class FakeChannels(object):
+        def __init__(self):
+            self.items = [FakeServo() for _ in range(16)]
+
+        def __getitem__(self, index):
+            return self.items[index]
+
+    class FakePCA(object):
+        def __init__(self):
+            self.frequency = None
+
+    class FakeServoKit(object):
+        instances = []
+
+        def __init__(self, channels, address):
+            self.channels = channels
+            self.address = address
+            self._pca = FakePCA()
+            self.continuous_servo = FakeChannels()
+            self.__class__.instances.append(self)
+
+    original_loader = driver_mod._load_servo_kit
+    drv = None
+    try:
+        driver_mod._load_servo_kit = lambda: FakeServoKit
+        drv = driver_mod.NvidiaJetRacerDriver(
+            implementation='waveshare_single_pca',
+            i2c_address=0x40, pwm_frequency=60,
+            steering_channel=0, throttle_channel=1,
+            steering_gain=-1.0, steering_offset=0.0,
+            throttle_gain=0.8, pulse_width_range=(500, 2500),
+            command_timeout_s=0.12)
+
+        kit = FakeServoKit.instances[-1]
+        steering = kit.continuous_servo[0]
+        throttle = kit.continuous_servo[1]
+        assert kit.address == 0x40
+        assert kit._pca.frequency == 60
+        assert steering.pulse_range == (500, 2500)
+
+        drv.set(0.50, 0.25)
+        assert abs(steering.throttle - (-0.50)) < 1e-9
+        assert abs(throttle.throttle - 0.20) < 1e-9
+        drv.stop()
+        assert throttle.throttle == 0.0
+
+        drv.set(0.0, 0.25)
+        time.sleep(0.25)
+        assert throttle.throttle == 0.0
+    finally:
+        if drv is not None:
+            drv.close()
+        driver_mod._load_servo_kit = original_loader
+
+
 def test_latest_grabber_surfaces_background_camera_error():
     """Exception trong thread camera phai hien ra UI, khong duoc chet im lang."""
 
@@ -427,6 +507,11 @@ def test_manual_collector_preview_control_and_recording():
         assert collector._grabber is not None
         assert collector.preview.value
 
+        # Chi mot gate bat buoc: phai tick banh xe da ke. Dead-man mac dinh tat.
+        collector._on_arm()
+        assert not collector._armed
+        assert not collector.use_deadman.value
+        collector.wheels_lifted.value = True
         collector._on_arm()
         assert collector._armed
         assert type(collector._driver).__name__ == 'DryRunDriver'
@@ -454,6 +539,51 @@ def test_manual_collector_preview_control_and_recording():
             rows = list(csv.DictReader(fh))
         assert len(rows) >= 2
         assert float(rows[-1]['throttle_cmd']) > 0.15
+
+        # Mo phong control loop dang ghi ga thi emergency den. Lock phai dam
+        # bao lenh cuoi cung sau khi set bi treo duoc nha ra van la (0, 0).
+        collector.controller.axes[1].value = 0.0
+        time.sleep(0.08)
+
+        class BlockingDriver(object):
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.blocked_once = False
+                self.last = (0.0, 0.0)
+
+            def set(self, steering, throttle):
+                if throttle > 0.0 and not self.blocked_once:
+                    self.blocked_once = True
+                    self.started.set()
+                    self.release.wait(1.0)
+                self.last = (steering, throttle)
+
+            def stop(self):
+                self.last = (0.0, 0.0)
+
+            def close(self):
+                self.stop()
+
+        blocking = BlockingDriver()
+        with collector._driver_io_lock:
+            collector._driver = blocking
+        collector.controller.axes[1].value = -1.0
+        assert blocking.started.wait(1.0)
+        emergency = threading.Thread(target=collector._on_emergency)
+        emergency.start()
+        time.sleep(0.03)
+        blocking.release.set()
+        emergency.join(timeout=1.0)
+        assert not emergency.is_alive()
+        assert not collector._armed
+        assert blocking.last == (0.0, 0.0)
+
+        collector._armed = True
+        blocking.last = (0.2, 0.2)
+        collector._on_wheels_lifted_change({'new': False})
+        assert not collector._armed
+        assert blocking.last == (0.0, 0.0)
     finally:
         if collector is not None:
             collector.close()

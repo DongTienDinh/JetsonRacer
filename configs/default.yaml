@@ -61,17 +61,18 @@ control:
   slowdown: 0.12
   reverse_throttle: -0.15  # dùng khi thoát kẹt
   driver:
-    # None (để trống / xoá dòng) = không đụng tới thuộc tính đó, giữ mặc định
-    # thư viện jetracer. steering_offset: 0.0 là một lệnh có ý nghĩa ("đặt về
-    # 0"), khác "đừng đụng vào" - xem control.txt của BTC để biết giá trị chốt.
-    # JetRacer Pro/Waveshare dùng PCA9685 ở 0x40. Một số image cũ có thêm
-    # i2c_address2 mặc định 0x60; đặt cả hai về 0x40 để không gọi nhầm mạch.
-    # Nếu i2cdetect của xe cho địa chỉ khác, sửa theo kết quả quét thực tế.
+    # Xe BTC/Waveshare co mot PCA9685 o 0x40. Dieu khien truc tiep de tranh
+    # bien the NvidiaRacecar hai dia chi (0x40 + 0x60) giu motor sau exception.
+    implementation: waveshare_single_pca
     i2c_address: 0x40
-    i2c_address2: 0x40
+    pwm_frequency: 60
+    steering_channel: 0
+    throttle_channel: 1
+    # Vong UI gui 30 Hz. Neu mat lenh qua 0.8 s, watchdog tu ghi throttle=0.
+    command_timeout_s: 0.8
     steering_gain: -1.0
     steering_offset: 0.0     # bù lệch cơ khí servo - đo lại trên xe thật
-    throttle_gain:            # để trống: giữ mặc định thư viện, cùng hệ quy chiếu BTC
+    throttle_gain: 0.8
     pulse_width_range: [500, 2500]
 
 signs:
