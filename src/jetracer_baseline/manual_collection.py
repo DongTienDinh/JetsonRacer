@@ -37,6 +37,7 @@ from jetracer_baseline.camera import (LatestFrameGrabber, build_source,
                                       format_camera_environment)
 from jetracer_baseline.config import load_config
 from jetracer_baseline.control.driver import build_driver
+from jetracer_baseline.recorder import FrameRecorder
 
 
 CSV_FIELDS = [
@@ -83,6 +84,25 @@ def shape_throttle(value, deadzone, minimum, maximum):
     minimum = _clip(minimum, 0.0, maximum)
     magnitude = minimum + abs(shaped) * (maximum - minimum)
     return magnitude if shaped > 0 else -magnitude
+
+
+def shape_steering(value, deadzone, maximum, expo):
+    """Deadzone + expo de lai mem quanh tam, van du bien do o hai dau."""
+    shaped = apply_deadzone(value, deadzone)
+    maximum = _clip(maximum, 0.0, 1.0)
+    expo = _clip(expo, 0.0, 1.0)
+    curved = (1.0 - expo) * shaped + expo * shaped * shaped * shaped
+    return curved * maximum
+
+
+def slew_towards(current, target, rate_per_s, dt):
+    """Gioi han do thay doi moi giay; emergency khong di qua ham nay."""
+    current = float(current)
+    target = float(target)
+    max_delta = max(0.0, float(rate_per_s)) * max(0.0, float(dt))
+    if max_delta <= 0.0:
+        return target
+    return current + _clip(target - current, -max_delta, max_delta)
 
 
 def _safe_session_name(value):
@@ -149,6 +169,9 @@ class DatasetSessionWriter(object):
     @property
     def count(self):
         return self._count
+
+    def update_metadata(self, values):
+        self._metadata.update(dict(values or {}))
 
     def _write_metadata(self, completed):
         data = dict(self._metadata)
@@ -250,6 +273,14 @@ class ManualDriveCollector(object):
         self.deadzone = widgets.FloatSlider(
             value=0.06, min=0.0, max=0.25, step=0.01,
             description='Deadzone:', readout_format='.2f')
+        self.max_steering = widgets.FloatSlider(
+            value=float(self.cfg.get('manual.max_steering', 0.85)),
+            min=0.20, max=1.00, step=0.05,
+            description='Lai toi da:', readout_format='.2f')
+        self.steering_expo = widgets.FloatSlider(
+            value=float(self.cfg.get('manual.steering_expo', 0.35)),
+            min=0.0, max=0.80, step=0.05,
+            description='Do mem lai:', readout_format='.2f')
         self.min_throttle = widgets.FloatSlider(
             value=float(self.cfg.get('manual.min_throttle', 0.12)),
             min=0.0, max=0.30, step=0.01,
@@ -261,6 +292,9 @@ class ManualDriveCollector(object):
         self.save_hz = widgets.FloatSlider(
             value=5.0, min=1.0, max=20.0, step=1.0,
             description='Luu FPS:', readout_format='.0f')
+        self.record_video = widgets.Checkbox(
+            value=bool(self.cfg.get('manual.record_video', True)),
+            description='Ghi drive.avi')
         self.use_deadman = widgets.Checkbox(
             value=False, description='Tuy chon dead-man')
         self.deadman_button = widgets.BoundedIntText(
@@ -324,12 +358,15 @@ class ManualDriveCollector(object):
         self._grabber = None
         self._driver = None
         self._writer = None
+        self._video_recorder = None
+        self._video_error_reported = False
         self._camera_thread = None
         self._control_thread = None
         self._stop_event = threading.Event()
         self._armed = False
         self._recording = False
         self._state_lock = threading.Lock()
+        self._recording_lock = threading.RLock()
         # Tuan tu hoa moi lenh phan cung. Emergency se doi lenh dang ghi xong,
         # sau do ghi ga=0 cuoi cung; control loop khong the ghi de len no.
         self._driver_io_lock = threading.RLock()
@@ -338,6 +375,7 @@ class ManualDriveCollector(object):
         self._steering_cmd = 0.0
         self._throttle_cmd = 0.0
         self._deadman_pressed = False
+        self._last_control_time = None
         self._camera_fps = 0.0
         self._last_session_dir = None
         self._closed = False
@@ -454,19 +492,42 @@ class ManualDriveCollector(object):
         steer_raw = float(self.controller.axes[steer_index].value)
         throttle_raw = float(self.controller.axes[throttle_index].value)
 
-        steer = apply_deadzone(steer_raw, self.deadzone.value)
+        steer_input = -steer_raw if self.invert_steering.value else steer_raw
+        steer = shape_steering(
+            steer_input, self.deadzone.value,
+            self.max_steering.value, self.steering_expo.value)
         throttle_input = -throttle_raw if self.invert_throttle.value \
             else throttle_raw
         throttle = shape_throttle(
             throttle_input, self.deadzone.value,
             self.min_throttle.value, self.max_throttle.value)
-        if self.invert_steering.value:
-            steer = -steer
-
         deadman = self._deadman_value()
         if not deadman:
             throttle = 0.0
         return steer_raw, throttle_raw, steer, throttle, deadman
+
+    def _smooth_command(self, steering_target, throttle_target, now):
+        with self._state_lock:
+            if self._last_control_time is None:
+                dt = 1.0 / 30.0
+            else:
+                dt = _clip(now - self._last_control_time, 0.001, 0.10)
+            steering = slew_towards(
+                self._steering_cmd, steering_target,
+                self.cfg.get('manual.steering_slew_rate', 2.5), dt)
+
+            current_throttle = self._throttle_cmd
+            if current_throttle * throttle_target < 0.0 or \
+                    abs(throttle_target) < abs(current_throttle):
+                throttle_rate = self.cfg.get(
+                    'manual.throttle_fall_rate', 4.0)
+            else:
+                throttle_rate = self.cfg.get(
+                    'manual.throttle_rise_rate', 1.2)
+            throttle = slew_towards(
+                current_throttle, throttle_target, throttle_rate, dt)
+            self._last_control_time = now
+        return steering, throttle
 
     def _zero_command(self):
         stop_error = None
@@ -482,6 +543,7 @@ class ManualDriveCollector(object):
             self._steering_cmd = 0.0
             self._throttle_cmd = 0.0
             self._deadman_pressed = False
+            self._last_control_time = None
         if stop_error is not None:
             self._log('Khong gui duoc lenh stop: %s' % stop_error)
         self.command_view.value = self._command_html()
@@ -499,6 +561,7 @@ class ManualDriveCollector(object):
                 except Exception:
                     pass
             if not self._armed:
+                self._last_control_time = None
                 time.sleep(0.05)
                 continue
             if not self._controller_ready():
@@ -509,18 +572,20 @@ class ManualDriveCollector(object):
                 continue
             try:
                 values = self._read_controller_command()
+                steering_cmd, throttle_cmd = self._smooth_command(
+                    values[2], values[3], now)
                 with self._driver_io_lock:
                     # Kiem tra lai ben trong lock: emergency co the da DISARM
                     # sau lan kiem tra o dau vong lap.
                     if not self._armed or self._actuator_test_running:
                         continue
-                    self._driver.set(values[2], values[3])
-                with self._state_lock:
-                    self._steering_raw = values[0]
-                    self._throttle_raw = values[1]
-                    self._steering_cmd = values[2]
-                    self._throttle_cmd = values[3]
-                    self._deadman_pressed = values[4]
+                    self._driver.set(steering_cmd, throttle_cmd)
+                    with self._state_lock:
+                        self._steering_raw = values[0]
+                        self._throttle_raw = values[1]
+                        self._steering_cmd = steering_cmd
+                        self._throttle_cmd = throttle_cmd
+                        self._deadman_pressed = values[4]
             except Exception as exc:
                 self._log('Loi dieu khien -> DISARM: %s' % exc)
                 self._armed = False
@@ -531,6 +596,7 @@ class ManualDriveCollector(object):
         last_frame_id = -1
         last_preview = 0.0
         last_save = 0.0
+        last_video_submit = 0.0
         fps_t0 = time.monotonic()
         fps_frames = 0
 
@@ -556,23 +622,46 @@ class ManualDriveCollector(object):
                 fps_t0 = now_mono
                 fps_frames = 0
 
-            if self._recording and self._writer is not None:
-                interval = 1.0 / max(1.0, float(self.save_hz.value))
-                if (now_mono - last_save) >= interval:
-                    last_save = now_mono
-                    try:
+            try:
+                with self._recording_lock:
+                    if self._recording and self._writer is not None:
                         with self._state_lock:
                             state = (
                                 self._steering_raw, self._throttle_raw,
                                 self._steering_cmd, self._throttle_cmd,
                                 self._deadman_pressed)
-                        self._writer.write(
-                            frame, frame_id, now_unix, now_mono,
-                            state[0], state[1], state[2], state[3], state[4],
-                            getattr(self.controller, 'connected', False))
-                    except Exception as exc:
-                        self._log('LOI GHI DATA -> dung ghi: %s' % exc)
-                        self._stop_recording()
+                        connected = getattr(
+                            self.controller, 'connected', False)
+                        video_fps = max(1.0, float(self.cfg.get(
+                            'manual.video_fps', 20)))
+                        if self._video_recorder is not None and \
+                                (now_mono - last_video_submit) >= \
+                                (1.0 / video_fps):
+                            last_video_submit = now_mono
+                            self._video_recorder.submit(
+                                frame, frame_id, timestamp=now_unix,
+                                extra={
+                                    'steering_raw': '%.6f' % state[0],
+                                    'throttle_raw': '%.6f' % state[1],
+                                    'steering_cmd': '%.6f' % state[2],
+                                    'throttle_cmd': '%.6f' % state[3],
+                                })
+                            if self._video_recorder.error is not None and \
+                                    not self._video_error_reported:
+                                self._video_error_reported = True
+                                self._log('LOI GHI VIDEO; anh/CSV van tiep tuc: %s' %
+                                          self._video_recorder.error)
+                        interval = 1.0 / max(
+                            1.0, float(self.save_hz.value))
+                        if (now_mono - last_save) >= interval:
+                            last_save = now_mono
+                            self._writer.write(
+                                frame, frame_id, now_unix, now_mono,
+                                state[0], state[1], state[2], state[3],
+                                state[4], connected)
+            except Exception as exc:
+                self._log('LOI GHI DATA -> dung ghi: %s' % exc)
+                self._stop_recording()
 
             if (now_mono - last_preview) >= 0.10:
                 last_preview = now_mono
@@ -703,10 +792,13 @@ class ManualDriveCollector(object):
                 requirement = 'khong can giu dead-man'
             self._set_status('DA ARM; %s' % requirement)
             self._log(
-                'ARM OK: driver=%s, steering=axis[%d], throttle=axis[%d], '
-                'max=%.2f, %s' % (
+                'ARM OK: driver=%s, steering=axis[%d] max=%.2f expo=%.2f, '
+                'throttle=axis[%d] max=%.2f, %s' % (
                     type(self._driver).__name__,
-                    int(self.steering_axis.value), int(self.throttle_axis.value),
+                    int(self.steering_axis.value),
+                    float(self.max_steering.value),
+                    float(self.steering_expo.value),
+                    int(self.throttle_axis.value),
                     float(self.max_throttle.value), requirement))
         except Exception as exc:
             self._armed = False
@@ -828,12 +920,23 @@ class ManualDriveCollector(object):
                 'invert_steering': bool(self.invert_steering.value),
                 'invert_throttle': bool(self.invert_throttle.value),
                 'deadzone': float(self.deadzone.value),
+                'max_steering': float(self.max_steering.value),
+                'steering_expo': float(self.steering_expo.value),
+                'steering_slew_rate': float(self.cfg.get(
+                    'manual.steering_slew_rate', 2.5)),
                 'min_throttle': float(self.min_throttle.value),
                 'max_throttle': float(self.max_throttle.value),
+                'throttle_rise_rate': float(self.cfg.get(
+                    'manual.throttle_rise_rate', 1.2)),
+                'throttle_fall_rate': float(self.cfg.get(
+                    'manual.throttle_fall_rate', 4.0)),
                 'use_deadman': bool(self.use_deadman.value),
                 'deadman_button': int(self.deadman_button.value),
             },
             'save_hz_requested': float(self.save_hz.value),
+            'record_video': bool(self.record_video.value),
+            'video_fps_requested': float(self.cfg.get(
+                'manual.video_fps', 20)),
         }
 
     def _on_start_recording(self, _button=None):
@@ -846,27 +949,72 @@ class ManualDriveCollector(object):
         if self._recording:
             self._log('Dang ghi roi.')
             return
+        writer = None
+        video_recorder = None
         try:
-            self._writer = DatasetSessionWriter(
+            writer = DatasetSessionWriter(
                 self.out_root, self.session_name.value,
                 metadata=self._metadata())
-            self._last_session_dir = self._writer.session_dir
-            self._recording = True
-            self._set_status('DANG GHI -> %s' % self._writer.session_dir)
-            self._log('BAT DAU GHI: %s' % self._writer.session_dir)
+            if self.record_video.value:
+                video_recorder = FrameRecorder(
+                    os.path.join(writer.session_dir, 'drive.avi'),
+                    fps=float(self.cfg.get('manual.video_fps', 20)),
+                    queue_size=int(self.cfg.get(
+                        'manual.video_queue_size', 60)),
+                    extra_fields=[
+                        'steering_raw', 'throttle_raw',
+                        'steering_cmd', 'throttle_cmd'])
+            with self._recording_lock:
+                self._writer = writer
+                self._video_recorder = video_recorder
+                self._video_error_reported = False
+                self._last_session_dir = writer.session_dir
+                self._recording = True
+            self._set_status('DANG GHI ANH + VIDEO -> %s' % writer.session_dir)
+            self._log('BAT DAU GHI: %s (video=%s)' % (
+                writer.session_dir,
+                'drive.avi' if video_recorder is not None else 'tat'))
         except Exception as exc:
+            if video_recorder is not None:
+                video_recorder.close()
+            if writer is not None:
+                writer.close()
             self._writer = None
+            self._video_recorder = None
             self._recording = False
             self._log('Khong tao duoc session: %s' % exc)
 
     def _stop_recording(self):
-        self._recording = False
-        writer = self._writer
-        self._writer = None
+        with self._recording_lock:
+            self._recording = False
+            writer = self._writer
+            video_recorder = self._video_recorder
+            self._writer = None
+            self._video_recorder = None
         if writer is not None:
+            video_written = 0
+            video_dropped = 0
+            video_error = None
+            if video_recorder is not None:
+                video_recorder.close()
+                video_written = video_recorder.n_written
+                video_dropped = video_recorder.n_dropped
+                if video_recorder.error is not None:
+                    video_error = str(video_recorder.error)
+            video_path = os.path.join(writer.session_dir, 'drive.avi')
+            video_saved = video_written > 0 and os.path.exists(video_path) and \
+                os.path.getsize(video_path) > 0
+            writer.update_metadata({
+                'video_file': 'drive.avi' if video_saved else None,
+                'video_frames': video_written,
+                'video_frames_dropped': video_dropped,
+                'video_error': video_error,
+            })
             writer.close()
             self._last_session_dir = writer.session_dir
-            self._log('DUNG GHI: %d anh -> %s' % (writer.count, writer.session_dir))
+            self._log('DUNG GHI: %d anh, %d frame video, bo %d -> %s' % (
+                writer.count, video_written, video_dropped,
+                writer.session_dir))
         if self._armed:
             self._set_status('da dung ghi; xe van ARM')
 
@@ -886,16 +1034,16 @@ class ManualDriveCollector(object):
     def _on_emergency(self, _button=None):
         self._actuator_stop_event.set()
         self._armed = False
-        self._stop_recording()
         self._zero_command()
+        self._stop_recording()
         self._set_status('DUNG KHAN CAP - motor=0, steering=0')
         self._log('DUNG KHAN CAP: da DISARM xe.')
 
     def _on_disarm(self, _button=None):
         self._actuator_stop_event.set()
         self._armed = False
-        self._stop_recording()
         self._zero_command()
+        self._stop_recording()
         self._set_status('DA DISARM - motor=0, steering=0')
         self._log('Da DISARM xe.')
 
@@ -907,14 +1055,17 @@ class ManualDriveCollector(object):
         warning = w.HTML(
             '<b style="color:#b00020">AN TOAN:</b> checkbox ke banh chi bat '
             'buoc khi TEST SERVO/MOTOR; khong dung checkbox nay de ARM lai '
-            'tren mat dat. Nut DUNG KHAN CAP luon cat ga va DISARM; watchdog '
-            'tu cat ga neu mat lenh UI.')
+            'tren mat dat. Lai da duoc gioi han va lam muot; khong tang bien '
+            'lai/PWM khi chua hieu chuan. Nut DUNG KHAN CAP luon cat ga ngay.')
         settings1 = w.HBox([
             self.session_name, self.steering_axis, self.throttle_axis])
         settings2 = w.HBox([
             self.invert_steering, self.invert_throttle, self.deadzone])
+        steering_settings = w.HBox([
+            self.max_steering, self.steering_expo])
         settings3 = w.HBox([
-            self.min_throttle, self.max_throttle, self.save_hz])
+            self.min_throttle, self.max_throttle,
+            self.save_hz, self.record_video])
         hardware_test = w.VBox([
             w.HTML('<b>Test phan cung doc lap (chi khi xe da ke):</b>'),
             w.HBox([self.wheels_lifted, self.test_steering,
@@ -933,6 +1084,7 @@ class ManualDriveCollector(object):
             self.controller_view,
             settings1,
             settings2,
+            steering_settings,
             settings3,
             hardware_test,
             buttons,
@@ -962,8 +1114,8 @@ class ManualDriveCollector(object):
         self._closed = True
         self._actuator_stop_event.set()
         self._armed = False
-        self._stop_recording()
         self._zero_command()
+        self._stop_recording()
         self._stop_event.set()
 
         if self._camera_thread is not None and self._camera_thread.is_alive():

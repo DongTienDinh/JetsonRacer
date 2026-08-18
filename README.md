@@ -135,9 +135,14 @@ MỞ CAMERA → đặt xe xuống đất → ARM TAY CẦM → BẮT ĐẦU GHI`
 Checkbox `BÁNH XE ĐÃ KÊ KHỎI MẶT ĐẤT` chỉ khóa hai nút test actuator, không
 khóa ARM lái thật. Dead-man mặc định tắt. Ga tay mặc định bắt đầu ở `0.12` sau
 deadzone và tăng tới `0.30`; hiệu chuẩn `Ga khởi động` tới mức nhỏ nhất làm bánh
-vừa quay khi xe đang kê. Mỗi session được lưu riêng tại
+vừa quay khi xe đang kê. Lái tay dùng expo `0.35`, giới hạn `0.85` và slew-rate
+`2.5 đơn vị/s`; driver dùng gain `-0.65`, PWM `750–2250 µs` để không ép servo
+tới chặn cơ khí. Mỗi session được lưu riêng tại
 `data/driving/<session_timestamp>/` gồm
-ảnh gốc, `labels.csv` và `metadata.json`. Với dataset segmentation bài 1, để
+ảnh gốc, `labels.csv`, `drive.avi`, `drive.sidecar.csv` và `metadata.json`.
+Video được ghi ở thread riêng nên không chặn vòng điều khiển; sidecar nối từng
+frame video với `frame_id`, thời gian và lệnh lái/ga. Mặc định video ghi 20 FPS
+để giảm tải Jetson, còn `Lưu FPS` chỉ điều khiển tần suất ảnh JPEG/nhãn. Với dataset segmentation bài 1, để
 `Lưu FPS = 5`; nếu sau này train imitation learning thì tăng lên 15–20 FPS.
 
 Hai bảng `Axes live` và `Buttons đang bấm` luôn cập nhật trước cả khi ARM. Nếu

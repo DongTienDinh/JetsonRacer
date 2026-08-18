@@ -17,6 +17,7 @@ import time
 import types
 
 import numpy as np
+import cv2
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -34,7 +35,7 @@ from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
 from jetracer_baseline.manual_collection import (                # noqa: E402
     DatasetSessionWriter, ManualDriveCollector, apply_deadzone,
-    shape_throttle)
+    shape_steering, shape_throttle, slew_towards)
 
 CONFIG = os.path.join(ROOT, 'configs', 'default.yaml')
 
@@ -56,8 +57,13 @@ def test_config_loads():
     assert cfg.get('control.driver.throttle_channel') == 1
     assert cfg.get('control.driver.command_timeout_s') > 0
     assert cfg.get('control.driver.pwm_frequency') is None
+    assert abs(cfg.get('control.driver.steering_gain')) <= 0.65
+    assert cfg.get('control.driver.pulse_width_range') == [750, 2250]
     assert 0 < cfg.get('manual.min_throttle') < cfg.get('manual.max_throttle')
     assert cfg.get('manual.test_throttle') >= cfg.get('manual.min_throttle')
+    assert 0 < cfg.get('manual.max_steering') <= 0.85
+    assert cfg.get('manual.steering_slew_rate') > 0
+    assert 10 <= cfg.get('manual.video_fps') <= cfg.get('camera.fps')
     # Doc override phai ghi de dung, khong lam mat khoa khac
     cfg2 = load_config(CONFIG, [os.path.join(ROOT, 'configs', 'fast.yaml')])
     assert cfg2.get('control.v_max') > cfg.get('control.v_max')
@@ -80,6 +86,10 @@ def test_manual_collection_deadzone_and_writer():
     assert shape_throttle(0.03, 0.06, 0.12, 0.30) == 0.0
     assert abs(shape_throttle(1.0, 0.06, 0.12, 0.30) - 0.30) < 1e-9
     assert -0.22 < shape_throttle(-0.50, 0.06, 0.12, 0.30) < -0.19
+    assert shape_steering(0.03, 0.06, 0.85, 0.35) == 0.0
+    assert abs(shape_steering(1.0, 0.06, 0.85, 0.35) - 0.85) < 1e-9
+    assert 0.25 < shape_steering(0.50, 0.06, 0.85, 0.35) < 0.32
+    assert abs(slew_towards(0.0, 1.0, 2.0, 0.1) - 0.2) < 1e-9
 
     temp_root = tempfile.mkdtemp(prefix='jetracer_collect_')
     writer = None
@@ -369,8 +379,8 @@ def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
             implementation='waveshare_single_pca',
             i2c_address=0x40, pwm_frequency=None,
             steering_channel=0, throttle_channel=1,
-            steering_gain=-1.0, steering_offset=0.0,
-            throttle_gain=0.8, pulse_width_range=(500, 2500),
+            steering_gain=-0.65, steering_offset=0.0,
+            throttle_gain=0.8, pulse_width_range=(750, 2250),
             command_timeout_s=0.12)
 
         kit = FakeServoKit.instances[-1]
@@ -378,10 +388,10 @@ def test_waveshare_direct_driver_stops_and_watchdog_cuts_throttle():
         throttle = kit.continuous_servo[1]
         assert kit.address == 0x40
         assert kit._pca.frequency is None
-        assert steering.pulse_range == (500, 2500)
+        assert steering.pulse_range == (750, 2250)
 
         drv.set(0.50, 0.25)
-        assert abs(steering.throttle - (-0.50)) < 1e-9
+        assert abs(steering.throttle - (-0.325)) < 1e-9
         assert abs(throttle.throttle - 0.20) < 1e-9
         drv.stop()
         assert throttle.throttle == 0.0
@@ -555,7 +565,7 @@ def test_manual_collector_preview_control_and_recording():
         collector.controller.axes[2].value = 0.50
         collector.controller.axes[1].value = -1.00
         time.sleep(0.15)
-        assert collector._steering_cmd > 0.40
+        assert 0.20 < collector._steering_cmd < 0.35
         assert collector._throttle_cmd > 0.15
         assert collector._deadman_pressed
 
@@ -568,11 +578,30 @@ def test_manual_collector_preview_control_and_recording():
         collector._on_stop_recording()
         assert collector.last_session_dir is not None
         labels = os.path.join(collector.last_session_dir, 'labels.csv')
+        video = os.path.join(collector.last_session_dir, 'drive.avi')
+        video_sidecar = os.path.join(
+            collector.last_session_dir, 'drive.sidecar.csv')
+        metadata_path = os.path.join(
+            collector.last_session_dir, 'metadata.json')
         assert os.path.exists(labels)
+        assert os.path.exists(video) and os.path.getsize(video) > 0
+        assert os.path.exists(video_sidecar)
         with open(labels, 'r') as fh:
             rows = list(csv.DictReader(fh))
         assert len(rows) >= 2
         assert float(rows[-1]['throttle_cmd']) > 0.15
+        with open(video_sidecar, 'r') as fh:
+            video_rows = list(csv.DictReader(fh))
+        assert len(video_rows) > 0
+        assert 'steering_cmd' in video_rows[0]
+        with open(metadata_path, 'r') as fh:
+            metadata = __import__('json').load(fh)
+        assert metadata['video_frames'] == len(video_rows)
+        assert metadata['video_error'] is None
+        cap = cv2.VideoCapture(video)
+        ok, saved_frame = cap.read()
+        cap.release()
+        assert ok and saved_frame is not None
 
         # Mo phong control loop dang ghi ga thi emergency den. Lock phai dam
         # bao lenh cuoi cung sau khi set bi treo duoc nha ra van la (0, 0).

@@ -171,13 +171,17 @@ Thứ tự trên giao diện: `KIỂM TRA TAY CẦM` → kê xe và tick xác nh
 `TEST SERVO` → `TEST MOTOR 0.5S` → `MỞ CAMERA` → đặt xe xuống đất →
 `ARM TAY CẦM` → `BẮT ĐẦU GHI`. Dead-man mặc định tắt; checkbox bánh đã kê chỉ
 là gate của hai nút test, không can thiệp ARM lái thật. `Ga khởi động` mặc định
-0.12 và `Ga tối đa` 0.30; hiệu chuẩn ngưỡng khởi động khi xe vẫn đang kê.
+0.12 và `Ga tối đa` 0.30; hiệu chuẩn ngưỡng khởi động khi xe vẫn đang kê. Không
+tăng `Lái tối đa`, `steering_gain` hoặc mở rộng PWM nếu servo chưa được kiểm tra
+chặn cơ khí; profile mặc định giới hạn PWM thực tế khoảng 1085–1915 µs khi lái
+tay hết cần và đổi góc từ từ bằng slew-rate.
 Hai bảng `Axes live` và `Buttons đang bấm` dùng để tìm mapping
 thật của từng loại tay cầm; không giả định mọi tay cầm đều là axes 2/1 và button
 4. Nút `DỪNG KHẨN CẤP` được tuần tự hóa với control loop: hủy bài test, dừng
 ghi, ghi ga=0 rồi DISARM; control loop không thể ghi đè lệnh ga sau emergency.
 Watchdog cũng tự cắt ga nếu mất lệnh quá 0.8 giây. Dữ liệu nằm trong
-`data/driving/<session_timestamp>/`; không
+`data/driving/<session_timestamp>/`, gồm ảnh/CSV và video `drive.avi` kèm
+`drive.sidecar.csv`; không
 chia ngẫu nhiên frame của cùng session sang cả train và validation.
 
 Đây là thứ cho phép cả đội làm việc offline suốt tuần sau mà không cần tranh xe.

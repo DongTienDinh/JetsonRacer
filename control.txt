@@ -8,12 +8,13 @@ from jetracer.nvidia_racecar import NvidiaRacecar
 car = NvidiaRacecar()
 
 try:
-    car.steering_motor.set_pulse_width_range(500, 2500)
-    print("✅ Đã mở khóa giới hạn góc cua vật lý (PWM: 500 - 2500) thành công!")
+    # Khong mo 500-2500: servo co the cham chan, stall va lam sut nguon Jetson.
+    car.steering_motor.set_pulse_width_range(750, 2250)
+    print("✅ Đã đặt giới hạn lái an toàn (PWM: 750 - 2250).")
 except Exception as e:
     print("⚠️ Không thể can thiệp xung PWM:", e)
 
-car.steering_gain = -1.0
+car.steering_gain = -0.65
 
 
 # ========================================================
