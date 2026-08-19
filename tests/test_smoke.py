@@ -9,6 +9,7 @@ nguyen khan hiem nhat (5 xe / 10 doi) - khong duoc dung de debug loi cu phap.
 
 import os
 import csv
+import io
 import shutil
 import sys
 import tempfile
@@ -38,9 +39,10 @@ from jetracer_baseline.perception.shading import (               # noqa: E402
 from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
 from jetracer_baseline.tuning_ui import (                        # noqa: E402
+    MODE_AUTO, MODE_MANUAL, MODE_STOP, ControllerShaper,
     LaneTuningEngine, RollingStats, _dict_diff)
 from jetracer_baseline.manual_collection import (                # noqa: E402
-    DatasetSessionWriter, ManualDriveCollector, apply_deadzone,
+    CSV_FIELDS, DatasetSessionWriter, ManualDriveCollector, apply_deadzone,
     shape_steering, shape_throttle, slew_towards)
 
 CONFIG = os.path.join(ROOT, 'configs', 'default.yaml')
@@ -1124,6 +1126,108 @@ def test_corner_controller_slows_down_when_lane_is_lost():
     for _ in range(5):
         _s, slow, _m = ctrl.step(0.0, 0.0, 0.0, 1.0, lane_found=False)
     assert slow < fast, 'mat vach ma ga khong giam: %.3f vs %.3f' % (slow, fast)
+
+
+def test_controller_shaper_respects_deadzone_and_limits():
+    """Tay cam khong duoc vuot gioi han da dat trong config."""
+    shaper = ControllerShaper(_cfg())
+
+    def settle(steer_raw, throttle_raw, **kw):
+        shaper.reset()
+        out = (0.0, 0.0)
+        for _ in range(80):
+            out = shaper.shape(steer_raw, throttle_raw, 1.0 / 30.0, **kw)
+        return out
+
+    assert settle(0.0, 0.0) == (0.0, 0.0)
+    # Trong deadzone -> khong duoc sinh lenh nao
+    steer, throttle = settle(0.05, 0.05)
+    assert steer == 0.0 and throttle == 0.0
+
+    steer, throttle = settle(1.0, 1.0)
+    assert abs(steer - shaper.max_steering) < 1e-6
+    assert abs(throttle - shaper.max_throttle) < 1e-6
+
+    steer, _t = settle(-1.0, 0.0)
+    assert abs(steer + shaper.max_steering) < 1e-6
+
+    # Dao truc phai doi dau
+    steer_norm, _t = settle(1.0, 0.0)
+    steer_inv, _t = settle(1.0, 0.0, invert_steering=True)
+    assert steer_norm > 0 > steer_inv
+
+
+def test_controller_shaper_deadman_cuts_throttle_not_steering():
+    """Nha dead-man phai cat GA ngay, nhung van cho lai de con be tranh."""
+    shaper = ControllerShaper(_cfg())
+    for _ in range(80):
+        steer, throttle = shaper.shape(1.0, 1.0, 1.0 / 30.0, deadman_ok=True)
+    assert throttle > 0.0
+
+    for _ in range(80):
+        steer, throttle = shaper.shape(1.0, 1.0, 1.0 / 30.0, deadman_ok=False)
+    assert throttle == 0.0, 'nha dead-man ma van con ga: %.3f' % throttle
+    assert abs(steer) > 0.0
+
+
+def test_controller_shaper_slew_limits_sudden_stick_movement():
+    """Gat can het co mot phat khong duoc thanh lenh nhay bac o servo."""
+    shaper = ControllerShaper(_cfg())
+    steer, _t = shaper.shape(1.0, 0.0, 1.0 / 30.0)
+    assert abs(steer) < shaper.max_steering, (
+        'lenh lai nhay thang len %.3f trong mot tick' % steer)
+    rate = shaper.steering_slew_rate / 30.0
+    assert abs(steer) <= rate + 1e-9
+
+
+def test_dataset_writer_extra_fields_are_optional_and_appended():
+    """Them cot phu KHONG duoc lam hong schema cua cac session da thu truoc do."""
+    workdir = tempfile.mkdtemp(prefix='ds_extra_')
+    try:
+        frame = np.zeros((16, 16, 3), np.uint8)
+
+        plain = DatasetSessionWriter(workdir, 'cu')
+        plain.write(frame, 1, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, False, False)
+        plain.close()
+        with io.open(plain.csv_path, encoding='utf-8') as fh:
+            assert list(csv.DictReader(fh).fieldnames) == list(CSV_FIELDS)
+
+        rich = DatasetSessionWriter(workdir, 'moi',
+                                    extra_fields=['cv_steer', 'cte'])
+        rich.write(frame, 2, 1.0, 1.0, 0.1, 0.2, 0.3, 0.4, True, True,
+                   extra={'cv_steer': '-0.5', 'cte': '0.25'})
+        rich.close()
+        with io.open(rich.csv_path, encoding='utf-8') as fh:
+            rows = list(csv.DictReader(fh))
+        # Cot chuan phai giu nguyen THU TU, cot phu noi vao sau
+        assert list(rows[0].keys())[:len(CSV_FIELDS)] == list(CSV_FIELDS)
+        assert rows[0]['cv_steer'] == '-0.5' and rows[0]['cte'] == '0.25'
+        assert rows[0]['steering_cmd'].startswith('0.3')
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_dataset_writer_ignores_duplicate_extra_field_names():
+    """Trung ten voi cot chuan se ghi de nhan train -> phai bi loai."""
+    workdir = tempfile.mkdtemp(prefix='ds_dup_')
+    try:
+        writer = DatasetSessionWriter(
+            workdir, 'dup', extra_fields=['steering_cmd', 'cte'])
+        writer.write(np.zeros((8, 8, 3), np.uint8), 1, 1.0, 1.0,
+                     0.0, 0.0, 0.77, 0.0, False, False,
+                     extra={'steering_cmd': 'HONG', 'cte': '0.1'})
+        writer.close()
+        with io.open(writer.csv_path, encoding='utf-8') as fh:
+            rows = list(csv.DictReader(fh))
+        assert rows[0]['steering_cmd'].startswith('0.77'), rows[0]['steering_cmd']
+        assert rows[0]['cte'] == '0.1'
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_ui_drive_modes_are_distinct():
+    """Ba che do phai khac nhau - tron lan la nguon goc cua 'tuong tay ma tu chay'."""
+    assert len({MODE_STOP, MODE_MANUAL, MODE_AUTO}) == 3
 
 
 def test_rolling_stats_window_and_flip_count():

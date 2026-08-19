@@ -36,6 +36,8 @@ from .control.corner import CornerController
 from .control.driver import build_driver
 from .control.pid import PID
 from .perception.lane import LaneDetector
+from .manual_collection import (
+    DatasetSessionWriter, shape_steering, shape_throttle, slew_towards)
 from .perception.shading import ShadingCorrector
 from .recorder import FrameRecorder
 
@@ -125,6 +127,72 @@ class RollingStats(object):
 
     def steer_history(self):
         return list(self._steer)
+
+
+# Ba che do lai. Tach ro de khong bao gio co chuyen "tuong dang tay ma xe tu chay".
+MODE_STOP = 'DUNG'
+MODE_MANUAL = 'TAY CAM'
+MODE_AUTO = 'TU DONG'
+
+
+class ControllerShaper(object):
+    """Bien gia tri truc tay cam tho thanh lenh lai/ga.
+
+    Tach khoi widget de test duoc: `widgets.Controller` chi ton tai trong
+    Jupyter, con phep bien doi nay moi la cho de sai dau/sai gioi han.
+
+    Dung lai dung cac ham da kiem chung trong manual_collection (deadzone, expo,
+    slew) thay vi viet lai - hai duong lai tay khac nhau se cho ra hai bo dataset
+    khong so sanh duoc voi nhau.
+    """
+
+    def __init__(self, cfg):
+        self.reset_from_config(cfg)
+        self._steer = 0.0
+        self._throttle = 0.0
+
+    def reset_from_config(self, cfg):
+        c = cfg.get
+        self.deadzone = float(c('manual.deadzone', 0.08))
+        self.max_steering = float(c('manual.max_steering', 0.60))
+        self.steering_expo = float(c('manual.steering_expo', 0.45))
+        self.steering_slew_rate = float(c('manual.steering_slew_rate', 1.5))
+        self.min_throttle = float(c('manual.min_throttle', 0.12))
+        self.max_throttle = float(c('manual.max_throttle', 0.30))
+        self.throttle_rise_rate = float(c('manual.throttle_rise_rate', 1.2))
+        self.throttle_fall_rate = float(c('manual.throttle_fall_rate', 4.0))
+
+    def reset(self):
+        self._steer = 0.0
+        self._throttle = 0.0
+
+    def shape(self, steer_raw, throttle_raw, dt, invert_steering=False,
+              invert_throttle=False, deadman_ok=True):
+        """Tra ve (steer, throttle) da qua deadzone, expo va gioi han slew."""
+        steer_in = -steer_raw if invert_steering else steer_raw
+        target_steer = shape_steering(steer_in, self.deadzone,
+                                      self.max_steering, self.steering_expo)
+        throttle_in = -throttle_raw if invert_throttle else throttle_raw
+        target_throttle = shape_throttle(throttle_in, self.deadzone,
+                                         self.min_throttle, self.max_throttle)
+        if not deadman_ok:
+            target_throttle = 0.0
+
+        dt = max(1e-3, min(0.10, float(dt)))
+        self._steer = slew_towards(self._steer, target_steer,
+                                   self.steering_slew_rate, dt)
+        # Nha ga nhanh hon tang ga - giong manual_collection.
+        if (self._throttle * target_throttle < 0.0
+                or abs(target_throttle) < abs(self._throttle)):
+            rate = self.throttle_fall_rate
+        else:
+            rate = self.throttle_rise_rate
+        self._throttle = slew_towards(self._throttle, target_throttle, rate, dt)
+        return self._steer, self._throttle
+
+    @property
+    def command(self):
+        return self._steer, self._throttle
 
 
 class LaneTuningEngine(object):
@@ -228,7 +296,7 @@ class LaneTuningEngine(object):
 
     # ------------------------------------------------------------------ render
     def render_panel(self, result, fps=0.0, armed=False, width=None,
-                     driver_kind='dryrun'):
+                     driver_kind='dryrun', ui_mode=None):
         """Panel 2x2: anh+mask, mask nhi phan, bird's-eye+fit, do thi CTE."""
         res = result['lane']
         proc = result['proc']
@@ -273,7 +341,8 @@ class LaneTuningEngine(object):
         top = np.hstack([overlay, binary])
         bottom = np.hstack([bev, chart])
         panel = np.vstack([top, bottom])
-        panel = _draw_banner(panel, res, result, fps, armed, driver_kind)
+        panel = _draw_banner(panel, res, result, fps, armed, driver_kind,
+                         ui_mode=ui_mode)
         if width:
             scale = float(width) / panel.shape[1]
             panel = cv2.resize(panel, (int(width), int(panel.shape[0] * scale)))
@@ -347,7 +416,8 @@ def _draw_chart(cte_hist, steer_hist, w, h):
     return chart
 
 
-def _draw_banner(panel, res, result, fps, armed, driver_kind='dryrun'):
+def _draw_banner(panel, res, result, fps, armed, driver_kind='dryrun',
+                 ui_mode=None):
     """Bang trang thai tren cung panel.
 
     Khoi so lieu duoc CANH PHAI theo be rong do duoc, khong dat o mot ty le co
@@ -361,8 +431,14 @@ def _draw_banner(panel, res, result, fps, armed, driver_kind='dryrun'):
 
     live = (str(driver_kind) != 'dryrun')
     ramp = float(result.get('ramp', 1.0))
-    if not armed:
-        state, colour = 'DANG DUNG (bam CHAY de xe di)', (160, 160, 160)
+    if armed and ui_mode == MODE_MANUAL:
+        # Phai phan biet ro: o che do nay CV van chay va van hien so lieu,
+        # nhung nguoi moi la nguoi dieu khien xe.
+        state = ('LAI TAY - ban dieu khien (CV chi do)' if live
+                 else 'LAI TAY (DRYRUN - banh khong quay)')
+        colour = (255, 160, 60)
+    elif not armed:
+        state, colour = 'DANG DUNG (bam CHAY hoac LAI TAY)', (160, 160, 160)
     elif not live:
         # Vang = dryrun khong gui gi xuong phan cung, banh dung yen. Bao "xe dang
         # chay" o day la noi doi va nguoi dung se ngoi doi xe chay.
@@ -421,7 +497,9 @@ class LaneTuningUI(object):
     def __init__(self, config_path='configs/default.yaml', source_kind='csi',
                  video_path=None, driver_kind='nvidia',
                  save_path='configs/tuned.yaml', preview_width=760,
-                 soft_start_s=1.0, record_dir='logs', record_fps=15.0):
+                 soft_start_s=1.0, record_dir='logs', record_fps=15.0,
+                 controller_index=0, data_root='data/driving',
+                 control_hz=30.0):
         try:
             import ipywidgets.widgets as widgets
         except ImportError:
@@ -443,6 +521,10 @@ class LaneTuningUI(object):
 
         self.engine = LaneTuningEngine(config_path)
         self.engine.soft_start_s = float(soft_start_s)
+        self.shaper = ControllerShaper(self.engine.cfg)
+        self.controller = widgets.Controller(index=int(controller_index))
+        self.data_root = data_root
+        self.control_period = 1.0 / max(5.0, float(control_hz))
 
         self._grabber = None
         self._driver = None
@@ -455,6 +537,22 @@ class LaneTuningUI(object):
         self.record_fps = float(record_fps)
         self._recorder = None
         self._record_lock = threading.Lock()
+        # Vong dieu khien PHAI tach khoi vong camera. Do duoc tren xe: vong
+        # camera + ve panel chi chay ~6 Hz; lai tay o 6 Hz thi khong dieu khien
+        # duoc. Thread nay chay 30 Hz doc lap, chi doc lenh CV moi nhat.
+        self._control_thread = None
+        self._control_stop = threading.Event()
+        self._state_lock = threading.Lock()
+        self._cv_steer = 0.0
+        self._cv_throttle = 0.0
+        self._man_steer = 0.0
+        self._man_throttle = 0.0
+        self._stick_raw = (0.0, 0.0)
+        self._deadman_ok = True
+        self.mode = MODE_STOP
+        self._writer = None
+        self._writer_lock = threading.Lock()
+        self._last_sample = 0.0
 
         self.preview = widgets.Image(format='jpeg', width=preview_width)
         self.status = widgets.HTML(value='<b>Trang thai:</b> chua mo camera')
@@ -462,6 +560,36 @@ class LaneTuningUI(object):
         self.output = widgets.Output(
             layout=widgets.Layout(border='1px solid #ddd', height='140px',
                                   overflow_y='auto'))
+
+        # --- cai dat tay cam ---
+        cfgget = self.engine.get_param
+        self.controller_view = widgets.HTML(
+            value='<b>Tay cam:</b> chua ket noi')
+        self.steering_axis = widgets.BoundedIntText(
+            value=2, min=0, max=15, description='Truc lai:',
+            layout=widgets.Layout(width='170px'))
+        self.throttle_axis = widgets.BoundedIntText(
+            value=1, min=0, max=15, description='Truc ga:',
+            layout=widgets.Layout(width='170px'))
+        self.invert_steering = widgets.Checkbox(
+            value=False, description='Dao lai',
+            layout=widgets.Layout(width='140px'))
+        self.invert_throttle = widgets.Checkbox(
+            value=True, description='Dao ga',
+            layout=widgets.Layout(width='140px'))
+        self.use_deadman = widgets.Checkbox(
+            value=False, description='Bat dead-man',
+            layout=widgets.Layout(width='170px'))
+        self.deadman_button = widgets.BoundedIntText(
+            value=4, min=0, max=15, description='Nut dead-man:',
+            layout=widgets.Layout(width='190px'))
+        self.session_name = widgets.Text(
+            value='bai1_taycam', description='Session:',
+            layout=widgets.Layout(width='300px'))
+        self.sample_hz = widgets.BoundedFloatText(
+            value=float(cfgget('manual.sample_hz', 10.0)), min=1.0, max=30.0,
+            step=1.0, description='Anh/giay:',
+            layout=widgets.Layout(width='180px'))
 
         self.line_color = widgets.Dropdown(
             options=[('do (sa ban tap)', 'red'), ('trang (sa ban thi)', 'white')],
@@ -489,6 +617,16 @@ class LaneTuningUI(object):
         self.btn_stop = widgets.Button(description='DUNG KHAN CAP',
                                        button_style='danger',
                                        layout=widgets.Layout(width='170px'))
+        self.btn_pad = widgets.Button(description='KET NOI TAY CAM',
+                                      button_style='info',
+                                      layout=widgets.Layout(width='190px'))
+        self.btn_manual = widgets.Button(
+            description='LAI TAY (thu data)', button_style='warning',
+            layout=widgets.Layout(width='210px'),
+            tooltip='Ban lai bang tay cam; CV van chay nen de so sanh')
+        self.btn_data = widgets.Button(description='GHI DATA (train)',
+                                       button_style='success',
+                                       layout=widgets.Layout(width='190px'))
         self.btn_record = widgets.Button(description='GHI VIDEO',
                                          layout=widgets.Layout(width='150px'))
         self.btn_reset = widgets.Button(description='Xoa thong ke')
@@ -500,6 +638,9 @@ class LaneTuningUI(object):
         self.btn_run.on_click(self._on_run)
         self.btn_halt.on_click(self._on_disarm)
         self.btn_stop.on_click(self._on_emergency)
+        self.btn_pad.on_click(self._on_probe_controller)
+        self.btn_manual.on_click(self._on_manual)
+        self.btn_data.on_click(self._on_data)
         self.btn_record.on_click(self._on_record)
         self.btn_reset.on_click(lambda _b: self.engine.stats.reset())
         self.btn_save.on_click(self._on_save)
@@ -619,15 +760,15 @@ class LaneTuningUI(object):
                 self._disarm()
                 break
 
-            self._record_frame(frame, frame_id, result, now)
+            # Cong bo lenh CV cho thread dieu khien. Vong camera KHONG con tu
+            # gui lenh: no chay ~6 Hz tren xe, gui truc tiep thi lai bi giat.
+            with self._state_lock:
+                self._cv_steer = result['steer']
+                self._cv_throttle = result['throttle']
 
-            if self._armed and self._driver is not None:
-                with self._driver_lock:
-                    try:
-                        self._driver.set(result['steer'], result['throttle'])
-                    except Exception as exc:
-                        self._log('LOI DRIVER -> DISARM: %s' % exc)
-                        self._disarm()
+            self._record_frame(frame, frame_id, result, now)
+            self._record_dataset(frame, frame_id, result, now,
+                                 time.monotonic())
 
             if (time.monotonic() - last_preview) >= 0.10:
                 last_preview = time.monotonic()
@@ -635,7 +776,7 @@ class LaneTuningUI(object):
                     panel = self.engine.render_panel(
                         result, fps=self._fps, armed=self._armed,
                         width=self.preview_width,
-                        driver_kind=self.driver_kind)
+                        driver_kind=self.driver_kind, ui_mode=self.mode)
                     data = self.engine.encode_jpeg(panel)
                     if data:
                         self.preview.value = data
@@ -649,6 +790,10 @@ class LaneTuningUI(object):
             if self._recorder is not None:
                 self._log('Camera dung -> tu dong dong file ghi.')
                 self._stop_record_locked()
+        with self._writer_lock:
+            if self._writer is not None:
+                self._log('Camera dung -> tu dong dong session data.')
+                self._stop_data_locked()
         try:
             grabber.stop()
         except Exception:
@@ -687,6 +832,188 @@ class LaneTuningUI(object):
             '<td style="padding-left:18px">lai doi dau</td><td><b>%d</b></td></tr>'
             '</table>' % (banner, s['n'], s['loss_pct'], s['cte_rms'],
                           s['cte_p95'], s['bands_mean'], s['steer_flips']))
+
+    # --------------------------------------------------- vong dieu khien 30 Hz
+    def _controller_ready(self):
+        return bool(getattr(self.controller, 'connected', False)) and \
+            len(self.controller.axes) > max(int(self.steering_axis.value),
+                                            int(self.throttle_axis.value))
+
+    def _read_sticks(self):
+        try:
+            return (float(self.controller.axes[
+                        int(self.steering_axis.value)].value),
+                    float(self.controller.axes[
+                        int(self.throttle_axis.value)].value))
+        except Exception:
+            return (0.0, 0.0)
+
+    def _deadman_value(self):
+        if not self.use_deadman.value:
+            return True
+        try:
+            return bool(self.controller.buttons[
+                int(self.deadman_button.value)].value)
+        except Exception:
+            # Khong doc duoc nut dead-man -> coi nhu KHONG giu. Mac dinh an toan
+            # phai la cat ga, khong phai cho chay tiep.
+            return False
+
+    def _ensure_control_thread(self):
+        if self._control_thread is not None and self._control_thread.is_alive():
+            return
+        self._control_stop.clear()
+        self._control_thread = threading.Thread(target=self._control_loop,
+                                                name='tune-control')
+        self._control_thread.daemon = True
+        self._control_thread.start()
+
+    def _control_loop(self):
+        """Gui lenh xuong driver o nhip co dinh, DOC LAP voi vong camera.
+
+        Vi sao phai tach: vong camera con ve panel va ma hoa JPEG nen tren xe
+        chi chay khoang 6 Hz. Lai tay o 6 Hz thi khong dieu khien duoc, va o
+        che do tu dong thi lenh toi driver cung giat theo nhip ve anh.
+        """
+        t_prev = time.time()
+        while not self._control_stop.is_set():
+            t0 = time.time()
+            dt = t0 - t_prev
+            t_prev = t0
+
+            mode = self.mode
+            if mode == MODE_MANUAL:
+                steer_raw, throttle_raw = self._read_sticks()
+                deadman = self._deadman_value()
+                steer, throttle = self.shaper.shape(
+                    steer_raw, throttle_raw, dt,
+                    invert_steering=bool(self.invert_steering.value),
+                    invert_throttle=bool(self.invert_throttle.value),
+                    deadman_ok=deadman)
+                with self._state_lock:
+                    self._stick_raw = (steer_raw, throttle_raw)
+                    self._deadman_ok = deadman
+                    self._man_steer = steer
+                    self._man_throttle = throttle
+            elif mode == MODE_AUTO:
+                with self._state_lock:
+                    steer = self._cv_steer
+                    throttle = self._cv_throttle
+            else:
+                steer, throttle = 0.0, 0.0
+                self.shaper.reset()
+
+            if self._armed and self._driver is not None:
+                with self._driver_lock:
+                    try:
+                        self._driver.set(steer, throttle)
+                    except Exception as exc:
+                        self._log('LOI DRIVER -> dung xe: %s' % exc)
+                        self._disarm()
+
+            sleep = self.control_period - (time.time() - t0)
+            if sleep > 0:
+                time.sleep(sleep)
+
+    # ------------------------------------------------------------- ghi dataset
+    # Cot phu ngoai schema chuan cua DatasetSessionWriter. `cv_*` la lenh CV
+    # truyen thong TREN CUNG FRAME nguoi dang lai -> so sanh truc tiep duoc
+    # "CV se lai the nao" voi "nguoi da lai the nao", khong can chay lai lan hai.
+    DATA_EXTRA = ['cv_steer', 'cv_throttle', 'cte', 'cte_lookahead',
+                  'curvature', 'drive_mode', 'n_bands', 'lane_found', 'ui_mode']
+
+    def _on_data(self, _b=None):
+        with self._writer_lock:
+            if self._writer is not None:
+                self._stop_data_locked()
+                return
+            if self._grabber is None:
+                self._log('Mo camera truoc khi ghi data.')
+                return
+            try:
+                self._writer = DatasetSessionWriter(
+                    self.data_root, self.session_name.value,
+                    metadata=self._data_metadata(),
+                    extra_fields=list(self.DATA_EXTRA))
+            except Exception as exc:
+                self._writer = None
+                self._log('Khong mo duoc session data: %s' % exc)
+                return
+            path = self._writer.session_dir
+        self.btn_data.description = 'DUNG GHI DATA'
+        self.btn_data.button_style = 'danger'
+        self._log('BAT DAU GHI DATA: %s (%.0f anh/giay)'
+                  % (path, float(self.sample_hz.value)))
+        self._log('Nhan lai/ga cua NGUOI nam o steering_cmd/throttle_cmd; '
+                  'lenh CV cung frame nam o cv_steer/cv_throttle.')
+
+    def _stop_data_locked(self):
+        writer = self._writer
+        self._writer = None
+        if writer is None:
+            return
+        try:
+            writer.close()
+        except Exception as exc:
+            self._log('Loi dong session data: %s' % exc)
+        self.btn_data.description = 'GHI DATA (train)'
+        self.btn_data.button_style = 'success'
+        if writer.error is not None:
+            self._log('LOI GHI DATA: %s' % writer.error)
+        self._log('DUNG GHI DATA: %d mau (vut %d) -> %s'
+                  % (writer.count, writer.dropped, writer.session_dir))
+
+    def _data_metadata(self):
+        cfg = self.engine.cfg
+        return {
+            'source_kind': self.source_kind,
+            'driver_kind': self.driver_kind,
+            'ui_mode': self.mode,
+            'proc_size': list(self.engine.proc_size),
+            'camera': cfg.get('camera'),
+            'lane': cfg.get('lane'),
+            'control': cfg.get('control'),
+            'shading_enabled': bool(cfg.get('camera.shading.enabled', False)),
+            'note': ('Anh la frame THO truoc khi sua mau/resize. '
+                     'steering_cmd/throttle_cmd = lenh NGUOI lai (nhan de train). '
+                     'cv_* = lenh CV truyen thong tren cung frame (de so sanh).'),
+        }
+
+    def _record_dataset(self, frame, frame_id, result, now, now_mono):
+        """Luu mot mau train. Thua nhip thi bo qua, khong bao gio block camera."""
+        writer = self._writer
+        if writer is None:
+            return
+        interval = 1.0 / max(1.0, float(self.sample_hz.value))
+        if (now_mono - self._last_sample) < interval:
+            return
+        self._last_sample = now_mono
+        res = result['lane']
+        with self._state_lock:
+            steer_raw, throttle_raw = self._stick_raw
+            man_steer = self._man_steer
+            man_throttle = self._man_throttle
+            deadman = self._deadman_ok
+        try:
+            writer.write(
+                frame, frame_id, now, now_mono,
+                steer_raw, throttle_raw, man_steer, man_throttle,
+                deadman, bool(getattr(self.controller, 'connected', False)),
+                extra={
+                    'cv_steer': '%.4f' % result['steer'],
+                    'cv_throttle': '%.4f' % result['throttle'],
+                    'cte': '%.4f' % res.cte,
+                    'cte_lookahead': '%.4f' % res.cte_lookahead,
+                    'curvature': '%.4f' % res.curvature,
+                    'drive_mode': result.get('mode', ''),
+                    'n_bands': '%d' % res.n_bands,
+                    'lane_found': '1' if res.found else '0',
+                    'ui_mode': self.mode,
+                })
+        except Exception as exc:
+            self._log('LOI GHI DATA -> dung ghi: %s' % exc)
+            with self._writer_lock:
+                self._stop_data_locked()
 
     # ------------------------------------------------------------- ghi video
     # Ghi frame THO (truoc resize/sua mau) co chu dich: con chay lai detector
@@ -758,6 +1085,93 @@ class LaneTuningUI(object):
             with self._record_lock:
                 self._stop_record_locked()
 
+    # -------------------------------------------------------- handler tay cam
+    def _on_probe_controller(self, _b=None):
+        """Doc trang thai tay cam. Phai bam/xoay can truoc thi trinh duyet moi
+        gui su kien gamepad dau tien - day la hanh vi cua Gamepad API, khong
+        phai loi ket noi."""
+        self._ensure_control_thread()
+        connected = bool(getattr(self.controller, 'connected', False))
+        n_axes = len(self.controller.axes)
+        n_buttons = len(self.controller.buttons)
+        name = getattr(self.controller, 'name', '') or '(khong ten)'
+        self._log('Tay cam: connected=%s, axes=%d, buttons=%d, name=%s'
+                  % (connected, n_axes, n_buttons, name))
+        if not connected:
+            self.controller_view.value = (
+                '<b>Tay cam:</b> <span style="color:#b00020">CHUA KET NOI</span>'
+                ' - cam receiver, BAM/XOAY can mot cai roi bam lai nut nay')
+            self._set_status('TAY CAM CHUA KET NOI')
+            return
+        need = max(int(self.steering_axis.value), int(self.throttle_axis.value))
+        if n_axes <= need:
+            self.controller_view.value = (
+                '<b>Tay cam:</b> %s - chi co %d truc, khong du cho truc %d'
+                % (name, n_axes, need))
+            self._log('Chon lai so truc lai/ga cho dung tay cam nay.')
+            return
+        steer_raw, throttle_raw = self._read_sticks()
+        self.controller_view.value = (
+            '<b>Tay cam:</b> <span style="color:#0a7">%s</span> - %d truc, '
+            '%d nut | lai[%d]=%+.2f ga[%d]=%+.2f'
+            % (name, n_axes, n_buttons, int(self.steering_axis.value),
+               steer_raw, int(self.throttle_axis.value), throttle_raw))
+        self._set_status('Tay cam OK - bam LAI TAY de dieu khien')
+
+    def _enter_mode(self, mode):
+        """Doi che do lai. Tra ve True neu vao duoc."""
+        if self._grabber is None:
+            self._log('Bam MO CAMERA truoc.')
+            return False
+        if mode == MODE_MANUAL:
+            if not self._controller_ready():
+                self._log('TU CHOI LAI TAY: tay cam chua san sang. Bam KET NOI '
+                          'TAY CAM va kiem tra so truc.')
+                self._set_status('TAY CAM CHUA SAN SANG')
+                return False
+            steer_raw, throttle_raw = self._read_sticks()
+            # Can chua ve giua ma ARM thi xe giat ngay khi nhan lenh dau tien.
+            if abs(steer_raw) > 0.20 or abs(throttle_raw) > 0.20:
+                self._log('TU CHOI LAI TAY: can gat chua ve giua '
+                          '(lai=%+.2f, ga=%+.2f).' % (steer_raw, throttle_raw))
+                self._set_status('Tha hai can ve giua roi bam lai')
+                return False
+        try:
+            if self._driver is None:
+                self._driver = build_driver(self.driver_kind, self.engine.cfg)
+            with self._driver_lock:
+                self._driver.stop()
+        except Exception as exc:
+            self._set_status('LOI DRIVER - xe khong chay')
+            self._log('Khong mo duoc driver %s: %s' % (self.driver_kind, exc))
+            return False
+
+        self.shaper.reset_from_config(self.engine.cfg)
+        self.shaper.reset()
+        self._ensure_control_thread()
+        self.mode = mode
+        self._armed = True
+        return True
+
+    def _on_manual(self, _b=None):
+        if self.mode == MODE_MANUAL:
+            self._on_disarm()
+            return
+        if not self._enter_mode(MODE_MANUAL):
+            return
+        self.engine.stop_run()          # che do tay khong dung ramp cua CV
+        live = (self.driver_kind != 'dryrun')
+        self.btn_manual.description = 'DUNG LAI TAY'
+        if live:
+            self._set_status('DANG LAI TAY - ban dieu khien xe. CV van chay de '
+                             'so sanh (khong dieu khien).')
+        else:
+            self._set_status('LAI TAY o DRYRUN - banh khong quay.')
+        self._log('LAI TAY: driver=%s, lai toi da %.2f, ga toi da %.2f, '
+                  'dead-man=%s' % (self.driver_kind, self.shaper.max_steering,
+                                   self.shaper.max_throttle,
+                                   'BAT' if self.use_deadman.value else 'tat'))
+
     # ----------------------------------------------------------------- buttons
     def _on_open(self, _b=None):
         if self._grabber is not None:
@@ -789,6 +1203,11 @@ class LaneTuningUI(object):
         if self._grabber is None:
             self._log('Bam MO CAMERA truoc.')
             return
+        if self.mode == MODE_MANUAL:
+            self._log('Dang o che do LAI TAY. Bam DUNG LAI TAY truoc khi cho '
+                      'CV dieu khien - hai che do khong duoc chay cung luc.')
+            self._set_status('Dang LAI TAY - dung truoc khi chuyen TU DONG')
+            return
         if self._armed:
             self._log('Xe dang chay roi.')
             return
@@ -808,6 +1227,8 @@ class LaneTuningUI(object):
                 self._driver.stop()
                 self._armed = True
             self.engine.pid.reset()
+            self.mode = MODE_AUTO
+            self._ensure_control_thread()
             self.engine.start_run()
             if self.driver_kind == 'dryrun':
                 self._set_status('DANG CHAY o che do DRYRUN - BANH KHONG QUAY '
@@ -829,7 +1250,10 @@ class LaneTuningUI(object):
 
     def _disarm(self):
         self._armed = False
+        self.mode = MODE_STOP
         self.engine.stop_run()
+        self.shaper.reset()
+        self.btn_manual.description = 'LAI TAY (thu data)'
         if self._driver is not None:
             with self._driver_lock:
                 try:
@@ -874,18 +1298,41 @@ class LaneTuningUI(object):
                     % self.driver_kind)
         warning = w.HTML(
             '%s<br><b style="color:#b00020">AN TOAN:</b> nut DUNG KHAN CAP cat '
-            'ga ngay. Camera dung hoac loi xu ly -> tu dong DISARM.' % mode)
-        buttons = w.HBox([self.btn_open, self.btn_run, self.btn_halt,
-                          self.btn_stop])
-        tools = w.HBox([self.btn_record, self.btn_reset, self.btn_save,
-                        self.btn_close])
-        tabs = w.Tab(children=[self.lane_box, self.control_box])
+            'ga ngay. Camera dung hoac loi xu ly -> tu dong cat ga.<br>'
+            '<b>LAI TAY</b> = ban dieu khien, CV van chay nhung chi ghi so lieu. '
+            '<b>CHAY</b> = CV dieu khien. Hai nut loai tru nhau.' % mode)
+        row_drive = w.HBox([self.btn_open, self.btn_pad, self.btn_manual,
+                            self.btn_run])
+        row_stop = w.HBox([self.btn_halt, self.btn_stop, self.btn_data,
+                           self.btn_record])
+        row_tools = w.HBox([self.btn_reset, self.btn_save, self.btn_close])
+
+        pad_box = w.VBox([
+            self.controller_view,
+            w.HBox([self.steering_axis, self.throttle_axis,
+                    self.invert_steering, self.invert_throttle]),
+            w.HBox([self.use_deadman, self.deadman_button]),
+            w.HTML('<hr><b>Thu data de train model</b>'),
+            w.HBox([self.session_name, self.sample_hz]),
+            w.HTML(
+                'Anh luu vao <code>data/driving/&lt;session&gt;_&lt;gio&gt;/</code>'
+                ' gom <code>images/</code>, <code>labels.csv</code>,'
+                ' <code>metadata.json</code>.<br>'
+                'Nhan de train nam o <code>steering_cmd</code>/'
+                '<code>throttle_cmd</code> (lenh NGUOI lai). Cot '
+                '<code>cv_steer</code>/<code>cv_throttle</code> la lenh CV '
+                'truyen thong TREN CUNG FRAME - so sanh duoc ngay CV lai the '
+                'nao so voi nguoi, khong phai chay lai lan hai.'),
+        ])
+
+        tabs = w.Tab(children=[self.lane_box, self.control_box, pad_box])
         tabs.set_title(0, 'Bam vach')
         tabs.set_title(1, 'Dieu khien')
+        tabs.set_title(2, 'Tay cam + Data')
         left = w.VBox([self.preview, self.status, self.metrics])
         right = w.VBox([w.HBox([self.line_color, self.use_shading]), tabs])
-        return w.VBox([warning, buttons, tools, w.HBox([left, right]),
-                       self.output])
+        return w.VBox([warning, row_drive, row_stop, row_tools,
+                       w.HBox([left, right]), self.output])
 
     def show(self):
         from IPython.display import display
@@ -894,10 +1341,16 @@ class LaneTuningUI(object):
 
     def close(self):
         self._stop_event.set()
+        self._control_stop.set()
         self._disarm()
+        if self._control_thread is not None and self._control_thread.is_alive():
+            self._control_thread.join(timeout=2.0)
         with self._record_lock:
             if self._recorder is not None:
                 self._stop_record_locked()
+        with self._writer_lock:
+            if self._writer is not None:
+                self._stop_data_locked()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         if self._grabber is not None:
@@ -917,7 +1370,8 @@ class LaneTuningUI(object):
 
 def launch_tuning_ui(config_path='configs/default.yaml', source_kind='csi',
                      video_path=None, driver_kind=None,
-                     save_path='configs/tuned.yaml', soft_start_s=1.0):
+                     save_path='configs/tuned.yaml', soft_start_s=1.0,
+                     controller_index=0, data_root='data/driving'):
     """Mo giao dien. Khong co lenh nao xuong phan cung cho den khi bam CHAY.
 
     `driver_kind=None` -> tu chon: replay video/anh tong hop thi khong the dieu
@@ -927,4 +1381,6 @@ def launch_tuning_ui(config_path='configs/default.yaml', source_kind='csi',
         driver_kind = 'dryrun' if source_kind in ('video', 'synthetic') else 'nvidia'
     return LaneTuningUI(config_path=config_path, source_kind=source_kind,
                         video_path=video_path, driver_kind=driver_kind,
-                        save_path=save_path, soft_start_s=soft_start_s).show()
+                        save_path=save_path, soft_start_s=soft_start_s,
+                        controller_index=controller_index,
+                        data_root=data_root).show()

@@ -153,7 +153,7 @@ class DatasetSessionWriter(object):
     """
 
     def __init__(self, out_root, session, metadata=None, jpeg_quality=95,
-                 flush_every=10, queue_size=64):
+                 flush_every=10, queue_size=64, extra_fields=None):
         stamp = time.strftime('%Y%m%d_%H%M%S')
         base_name = '%s_%s' % (_safe_session_name(session), stamp)
         self.session_dir = os.path.join(out_root, base_name)
@@ -168,7 +168,12 @@ class DatasetSessionWriter(object):
         self.csv_path = os.path.join(self.session_dir, 'labels.csv')
         self.metadata_path = os.path.join(self.session_dir, 'metadata.json')
         self._fh = io.open(self.csv_path, 'w', newline='', encoding='utf-8')
-        self._csv = csv.DictWriter(self._fh, fieldnames=CSV_FIELDS)
+        # Cot phu (tuy chon) noi sau cac cot chuan. Giu nguyen thu tu CSV_FIELDS
+        # de cac session cu va script phan tich cu van doc duoc.
+        self._extra_fields = [f for f in (extra_fields or [])
+                              if f not in CSV_FIELDS]
+        self._fields = list(CSV_FIELDS) + self._extra_fields
+        self._csv = csv.DictWriter(self._fh, fieldnames=self._fields)
         self._csv.writeheader()
         self._jpeg_quality = int(_clip(jpeg_quality, 50, 100))
         self._flush_every = max(1, int(flush_every))
@@ -209,6 +214,7 @@ class DatasetSessionWriter(object):
         data['completed'] = bool(completed)
         data['samples'] = self._count
         data['samples_dropped'] = self._dropped
+        data['csv_fields'] = list(self._fields)
         if self._shape is not None:
             data['frame_height'] = int(self._shape[0])
             data['frame_width'] = int(self._shape[1])
@@ -219,7 +225,7 @@ class DatasetSessionWriter(object):
     def write(self, frame, camera_frame_id, timestamp_unix,
               timestamp_monotonic, steering_raw, throttle_raw,
               steering_cmd, throttle_cmd, deadman_pressed,
-              controller_connected):
+              controller_connected, extra=None):
         """Ghim frame vao hang cho ghi dia; khong bao gio block vong goi.
 
         Loi I/O (dia day, quyen ghi...) xay ra o thread nen duoc nem lai o lan
@@ -249,6 +255,8 @@ class DatasetSessionWriter(object):
             'deadman_pressed': int(bool(deadman_pressed)),
             'controller_connected': int(bool(controller_connected)),
         }
+        for name in self._extra_fields:
+            row[name] = (extra or {}).get(name, '')
         try:
             self._queue.put_nowait((frame, image_path, row))
         except queue.Full:
