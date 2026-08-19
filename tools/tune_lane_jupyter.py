@@ -5,11 +5,14 @@ Tren XE (Jetson), trong mot cell tai thu muc goc du an:
 
     %run tools/tune_lane_jupyter.py
 
-Mac dinh la `driver_kind='dryrun'`: xem camera va chinh nguong thoai mai, banh
-KHONG quay. Chi khi nao muon cho xe chay that moi truyen `driver_kind='nvidia'`:
+Mo len la o trang thai DUNG - khong co lenh nao xuong phan cung. Bam nut
+**2. CHAY - BAM LINE** thi xe moi bat dau tu chay. Ga tang dan trong 1 giay
+dau de xe khong giat.
+
+Muon xem thu ma chac chan banh khong quay (vi du khi dat xe tren ban):
 
     from tools.tune_lane_jupyter import launch
-    ui = launch(driver_kind='nvidia')
+    ui = launch(driver_kind='dryrun')
 
 Tren LAPTOP, tune lai bang video da quay o sa ban (khong can xe):
 
@@ -34,12 +37,16 @@ from jetracer_baseline.tuning_ui import launch_tuning_ui  # noqa: E402
 
 
 def launch(config_path='configs/default.yaml', source_kind='csi',
-           video_path=None, driver_kind='dryrun',
-           save_path='configs/tuned.yaml'):
-    """Mo giao dien. `driver_kind='dryrun'` mac dinh de khong lo cho xe chay."""
+           video_path=None, driver_kind=None,
+           save_path='configs/tuned.yaml', soft_start_s=1.0):
+    """Mo giao dien tune.
+
+    KHONG co lenh nao xuong phan cung cho den khi bam nut CHAY. `driver_kind`
+    de trong -> camera that dung 'nvidia', replay video dung 'dryrun'.
+    """
     return launch_tuning_ui(config_path=config_path, source_kind=source_kind,
                             video_path=video_path, driver_kind=driver_kind,
-                            save_path=save_path)
+                            save_path=save_path, soft_start_s=soft_start_s)
 
 
 if __name__ == '__main__':

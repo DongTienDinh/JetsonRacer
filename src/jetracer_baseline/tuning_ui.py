@@ -127,6 +127,11 @@ class LaneTuningEngine(object):
         self.config_path = config_path
         self.cfg = load_config(config_path, overrides or [])
         self.stats = RollingStats()
+        # Ga khong duoc nhay tu 0 len v_max ngay khi bam CHAY: xe giat, banh
+        # truot, va nguoi bam khong kip phan ung neu huong lai dang sai. Ramp
+        # tuyen tinh trong `soft_start_s` giay dau.
+        self.soft_start_s = 1.0
+        self._run_t0 = None
         self._dirty = True
         self.rebuild()
 
@@ -160,8 +165,32 @@ class LaneTuningEngine(object):
         self.steer_max = float(cfg.get('control.steer_max', 0.60))
         self._dirty = False
 
+    # --------------------------------------------------------------- run state
+    def start_run(self, now=None):
+        """Danh dau bat dau chay -> ga bat dau ramp tu 0."""
+        self._run_t0 = time.time() if now is None else now
+        self.pid.reset()
+
+    def stop_run(self):
+        self._run_t0 = None
+
+    @property
+    def running(self):
+        return self._run_t0 is not None
+
+    def soft_start_scale(self, now=None):
+        """He so ga 0..1. Bang 1 khi chua chay (de preview hien ga day du)."""
+        if self._run_t0 is None:
+            return 1.0
+        if self.soft_start_s <= 0:
+            return 1.0
+        elapsed = (time.time() if now is None else now) - self._run_t0
+        if elapsed >= self.soft_start_s:
+            return 1.0
+        return max(0.0, elapsed / self.soft_start_s)
+
     # ----------------------------------------------------------------- process
-    def process(self, frame_bgr, dt):
+    def process(self, frame_bgr, dt, now=None):
         """Tra ve dict ket qua. KHONG gui lenh ra driver - do la viec cua UI."""
         if self._dirty:
             self.rebuild()
@@ -178,15 +207,18 @@ class LaneTuningEngine(object):
                  - self.slowdown * abs(res.cte)
                  - self.curve_slowdown * abs(res.curvature))
         throttle = max(self.v_min, min(self.v_max, speed))
+        ramp = self.soft_start_scale(now)
+        throttle *= ramp
 
         self.stats.push(res.cte, steer, res.found, res.n_bands)
         return {
             'proc': proc, 'lane': res, 'steer': steer, 'throttle': throttle,
-            'error': err,
+            'error': err, 'ramp': ramp,
         }
 
     # ------------------------------------------------------------------ render
-    def render_panel(self, result, fps=0.0, armed=False, width=None):
+    def render_panel(self, result, fps=0.0, armed=False, width=None,
+                     driver_kind='dryrun'):
         """Panel 2x2: anh+mask, mask nhi phan, bird's-eye+fit, do thi CTE."""
         res = result['lane']
         proc = result['proc']
@@ -231,7 +263,7 @@ class LaneTuningEngine(object):
         top = np.hstack([overlay, binary])
         bottom = np.hstack([bev, chart])
         panel = np.vstack([top, bottom])
-        panel = _draw_banner(panel, res, result, fps, armed)
+        panel = _draw_banner(panel, res, result, fps, armed, driver_kind)
         if width:
             scale = float(width) / panel.shape[1]
             panel = cv2.resize(panel, (int(width), int(panel.shape[0] * scale)))
@@ -305,30 +337,48 @@ def _draw_chart(cte_hist, steer_hist, w, h):
     return chart
 
 
-def _draw_banner(panel, res, result, fps, armed):
-    banner_h = 58
-    banner = np.zeros((banner_h, panel.shape[1], 3), np.uint8)
+def _draw_banner(panel, res, result, fps, armed, driver_kind='dryrun'):
+    """Bang trang thai tren cung panel.
+
+    Khoi so lieu duoc CANH PHAI theo be rong do duoc, khong dat o mot ty le co
+    dinh: chuoi trang thai dai ngan khac nhau tuy driver, dat cung cho thi hai
+    khoi chu de len nhau va khong doc duoc con so nao.
+    """
+    width = panel.shape[1]
+    banner = np.zeros((58, width, 3), np.uint8)
     banner[:] = (18, 18, 18)
-    state = 'DA ARM - XE SE CHAY' if armed else 'CHUA ARM (chi xem)'
-    colour = (60, 60, 255) if armed else (160, 160, 160)
-    cv2.putText(banner, state, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 2)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    live = (str(driver_kind) != 'dryrun')
+    ramp = float(result.get('ramp', 1.0))
+    if not armed:
+        state, colour = 'DANG DUNG (bam CHAY de xe di)', (160, 160, 160)
+    elif not live:
+        # Vang = dryrun khong gui gi xuong phan cung, banh dung yen. Bao "xe dang
+        # chay" o day la noi doi va nguoi dung se ngoi doi xe chay.
+        state, colour = 'DRYRUN - BANH KHONG QUAY', (0, 200, 255)
+    elif ramp < 1.0:
+        state, colour = 'DANG CHAY - tang ga %d%%' % int(ramp * 100), (0, 200, 255)
+    else:
+        state, colour = 'DANG CHAY - BAM LINE', (60, 60, 255)
+
+    cv2.putText(banner, state, (8, 20), font, 0.5, colour, 2)
     found = 'CO' if res.found else 'MAT VACH'
-    # "FPS(UI)" chu khong phai "FPS": vong nay con ve panel va ma hoa JPEG nen
-    # LUON cham hon vong dieu khien that. Con so doi chieu nguong 20 cua BTC chi
-    # duoc lay tu mot luot chay qua CLI, khong duoc lay o day.
-    cv2.putText(banner,
-                'vach=%s  dai=%d  FPS(UI)=%.1f' % (found, res.n_bands, fps),
-                (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+    cv2.putText(banner, 'vach=%s  dai=%d  FPS(UI)=%.1f  driver=%s'
+                % (found, res.n_bands, fps, driver_kind),
+                (8, 44), font, 0.42,
                 (120, 240, 120) if res.found else (60, 60, 255), 1)
-    cv2.putText(banner,
-                'cte=%+.3f  ngam=%+.3f  cong=%+.3f' % (
-                    res.cte, res.cte_lookahead, res.curvature),
-                (int(panel.shape[1] * 0.42), 20), cv2.FONT_HERSHEY_SIMPLEX,
-                0.45, (240, 240, 240), 1)
-    cv2.putText(banner,
-                'lai=%+.3f  ga=%.3f' % (result['steer'], result['throttle']),
-                (int(panel.shape[1] * 0.42), 44), cv2.FONT_HERSHEY_SIMPLEX,
-                0.45, (240, 240, 240), 1)
+
+    right = [
+        'cte=%+.3f  ngam=%+.3f  cong=%+.3f' % (
+            res.cte, res.cte_lookahead, res.curvature),
+        'lai=%+.3f  ga=%.3f' % (result['steer'], result['throttle']),
+    ]
+    widest = max(cv2.getTextSize(t, font, 0.42, 1)[0][0] for t in right)
+    x = max(8, width - widest - 10)
+    for i, text in enumerate(right):
+        cv2.putText(banner, text, (x, 20 + i * 24), font, 0.42,
+                    (240, 240, 240), 1)
     return np.vstack([banner, panel])
 
 
@@ -352,8 +402,9 @@ class LaneTuningUI(object):
     """Giao dien Jupyter noi slider vao LaneTuningEngine."""
 
     def __init__(self, config_path='configs/default.yaml', source_kind='csi',
-                 video_path=None, driver_kind='dryrun',
-                 save_path='configs/tuned.yaml', preview_width=760):
+                 video_path=None, driver_kind='nvidia',
+                 save_path='configs/tuned.yaml', preview_width=760,
+                 soft_start_s=1.0):
         try:
             import ipywidgets.widgets as widgets
         except ImportError:
@@ -374,6 +425,7 @@ class LaneTuningUI(object):
         self.preview_width = preview_width
 
         self.engine = LaneTuningEngine(config_path)
+        self.engine.soft_start_s = float(soft_start_s)
 
         self._grabber = None
         self._driver = None
@@ -404,19 +456,26 @@ class LaneTuningUI(object):
 
         self.btn_open = widgets.Button(description='1. MO CAMERA',
                                        button_style='info')
-        self.btn_arm = widgets.Button(description='2. ARM (cho xe chay)',
-                                      button_style='warning')
-        self.btn_disarm = widgets.Button(description='DISARM')
+        run_label = ('2. CHAY (DRYRUN - banh khong quay)'
+                     if driver_kind == 'dryrun' else '2. CHAY - BAM LINE')
+        self.btn_run = widgets.Button(
+            description=run_label, button_style='danger',
+            layout=widgets.Layout(width='260px'),
+            tooltip='Xe bat dau tu bam line. Ga tang dan trong %.1f giay dau.'
+                    % soft_start_s)
+        self.btn_halt = widgets.Button(description='DUNG',
+                                       layout=widgets.Layout(width='120px'))
         self.btn_stop = widgets.Button(description='DUNG KHAN CAP',
-                                       button_style='danger')
+                                       button_style='danger',
+                                       layout=widgets.Layout(width='170px'))
         self.btn_reset = widgets.Button(description='Xoa thong ke')
         self.btn_save = widgets.Button(description='LUU CONFIG',
                                        button_style='success')
         self.btn_close = widgets.Button(description='Dong')
 
         self.btn_open.on_click(self._on_open)
-        self.btn_arm.on_click(self._on_arm)
-        self.btn_disarm.on_click(self._on_disarm)
+        self.btn_run.on_click(self._on_run)
+        self.btn_halt.on_click(self._on_disarm)
         self.btn_stop.on_click(self._on_emergency)
         self.btn_reset.on_click(lambda _b: self.engine.stats.reset())
         self.btn_save.on_click(self._on_save)
@@ -530,7 +589,7 @@ class LaneTuningUI(object):
                 fps_n = 0
 
             try:
-                result = self.engine.process(frame, dt)
+                result = self.engine.process(frame, dt, now=now)
             except Exception as exc:
                 self._log('LOI XU LY -> DISARM: %s' % exc)
                 self._disarm()
@@ -549,7 +608,8 @@ class LaneTuningUI(object):
                 try:
                     panel = self.engine.render_panel(
                         result, fps=self._fps, armed=self._armed,
-                        width=self.preview_width)
+                        width=self.preview_width,
+                        driver_kind=self.driver_kind)
                     data = self.engine.encode_jpeg(panel)
                     if data:
                         self.preview.value = data
@@ -625,17 +685,21 @@ class LaneTuningUI(object):
         self._log('Camera OK, backend=%s'
                   % getattr(source, 'backend', self.source_kind))
 
-    def _on_arm(self, _b=None):
+    def _on_run(self, _b=None):
         if self._grabber is None:
-            self._log('Mo camera truoc khi ARM.')
+            self._log('Bam MO CAMERA truoc.')
+            return
+        if self._armed:
+            self._log('Xe dang chay roi.')
             return
         summary = self.engine.stats.summary()
         # Khong cho ARM khi detector dang mat vach lien tuc: xe se lao theo gia
         # tri cte cu. Day la loi de xay ra nhat khi vua keo slider xong.
         if summary is not None and summary['n'] >= 20 and summary['loss_pct'] > 20.0:
-            self._log('TU CHOI ARM: dang mat vach %.0f%% frame. Chinh nguong '
-                      'cho mask sach roi ARM lai.' % summary['loss_pct'])
-            self._set_status('TU CHOI ARM - mask chua on')
+            self._log('TU CHOI CHAY: dang mat vach %.0f%% frame. Xe se lao theo '
+                      'gia tri cte cu. Chinh nguong cho mask sach roi bam lai.'
+                      % summary['loss_pct'])
+            self._set_status('TU CHOI CHAY - mask chua on')
             return
         try:
             if self._driver is None:
@@ -644,16 +708,28 @@ class LaneTuningUI(object):
                 self._driver.stop()
                 self._armed = True
             self.engine.pid.reset()
-            self._set_status('DA ARM - xe se chay theo vach (driver=%s)'
-                             % self.driver_kind)
-            self._log('ARM OK: driver=%s' % type(self._driver).__name__)
+            self.engine.start_run()
+            if self.driver_kind == 'dryrun':
+                self._set_status('DANG CHAY o che do DRYRUN - BANH KHONG QUAY '
+                                 '(dung de xem thu, khong dieu khien xe)')
+                self._log('CHAY (dryrun): khong co lenh nao xuong phan cung.')
+            else:
+                self._set_status('DANG CHAY - xe tu bam line (driver=%s). '
+                                 'Ga tang dan trong %.1f giay dau.'
+                                 % (self.driver_kind, self.engine.soft_start_s))
+                self._log('CHAY: driver=%s, ga ramp %.1fs. Bam DUNG hoac DUNG '
+                          'KHAN CAP de cat ga.'
+                          % (type(self._driver).__name__,
+                             self.engine.soft_start_s))
         except Exception as exc:
             self._armed = False
-            self._set_status('LOI DRIVER')
-            self._log('Khong ARM duoc driver %s: %s' % (self.driver_kind, exc))
+            self.engine.stop_run()
+            self._set_status('LOI DRIVER - xe khong chay')
+            self._log('Khong chay duoc voi driver %s: %s' % (self.driver_kind, exc))
 
     def _disarm(self):
         self._armed = False
+        self.engine.stop_run()
         if self._driver is not None:
             with self._driver_lock:
                 try:
@@ -663,8 +739,8 @@ class LaneTuningUI(object):
 
     def _on_disarm(self, _b=None):
         self._disarm()
-        self._set_status('DA DISARM - motor=0')
-        self._log('Da DISARM.')
+        self._set_status('DA DUNG - motor=0')
+        self._log('Da dung xe.')
 
     def _on_emergency(self, _b=None):
         self._disarm()
@@ -687,11 +763,19 @@ class LaneTuningUI(object):
     # -------------------------------------------------------------------- view
     def widget(self):
         w = self.widgets
+        if self.driver_kind == 'dryrun':
+            mode = ('<b style="color:#0a7">DANG O CHE DO DRYRUN</b> - banh se '
+                    'KHONG quay du co bam ARM. Dung de chinh nguong an toan. '
+                    'Muon xe chay that: <code>ui.close()</code> roi '
+                    '<code>launch(driver_kind="nvidia")</code>.')
+        else:
+            mode = ('<b style="color:#b00020">DRIVER=%s - XE SE CHAY THAT khi '
+                    'bam ARM.</b> Ke banh khoi mat dat o lan ARM dau tien.'
+                    % self.driver_kind)
         warning = w.HTML(
-            '<b style="color:#b00020">AN TOAN:</b> nut ARM cho xe chay THAT khi '
-            'driver=nvidia. Ke banh khoi mat dat o lan ARM dau tien. Nut DUNG '
-            'KHAN CAP cat ga ngay. Camera dung hoac loi xu ly -> tu dong DISARM.')
-        buttons = w.HBox([self.btn_open, self.btn_arm, self.btn_disarm,
+            '%s<br><b style="color:#b00020">AN TOAN:</b> nut DUNG KHAN CAP cat '
+            'ga ngay. Camera dung hoac loi xu ly -> tu dong DISARM.' % mode)
+        buttons = w.HBox([self.btn_open, self.btn_run, self.btn_halt,
                           self.btn_stop])
         tools = w.HBox([self.btn_reset, self.btn_save, self.btn_close])
         tabs = w.Tab(children=[self.lane_box, self.control_box])
@@ -728,8 +812,15 @@ class LaneTuningUI(object):
 
 
 def launch_tuning_ui(config_path='configs/default.yaml', source_kind='csi',
-                     video_path=None, driver_kind='dryrun',
-                     save_path='configs/tuned.yaml'):
+                     video_path=None, driver_kind=None,
+                     save_path='configs/tuned.yaml', soft_start_s=1.0):
+    """Mo giao dien. Khong co lenh nao xuong phan cung cho den khi bam CHAY.
+
+    `driver_kind=None` -> tu chon: replay video/anh tong hop thi khong the dieu
+    khien xe that, nen dung dryrun; camera that thi dung nvidia.
+    """
+    if driver_kind is None:
+        driver_kind = 'dryrun' if source_kind in ('video', 'synthetic') else 'nvidia'
     return LaneTuningUI(config_path=config_path, source_kind=source_kind,
                         video_path=video_path, driver_kind=driver_kind,
-                        save_path=save_path).show()
+                        save_path=save_path, soft_start_s=soft_start_s).show()

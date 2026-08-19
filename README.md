@@ -77,8 +77,10 @@ thấy ngay kết quả, không cần SSH gõ lệnh trên Jetson:
 jupyter lab --ip=0.0.0.0 --no-browser
 ```
 
-Mở [tune_lane.ipynb](tune_lane.ipynb) từ máy khác và Run All. Mặc định `driver_kind='dryrun'`
-— bánh không quay. Chỉnh xong bấm **LƯU CONFIG** → ghi `configs/tuned.yaml`, rồi chạy thật:
+Mở [tune_lane.ipynb](tune_lane.ipynb) từ máy khác và Run All. Giao diện mở lên ở trạng
+thái **dừng** — không lệnh nào xuống phần cứng cho đến khi bấm **CHẠY - BÁM LINE**; ga
+tăng dần trong 1 giây đầu. Chỉnh xong bấm **LƯU CONFIG** → ghi `configs/tuned.yaml`,
+rồi chạy lượt chính thức có ghi log:
 
 ```bash
 python3 -m src.jetracer_baseline.cli run --task speed --driver nvidia --override configs/tuned.yaml --record

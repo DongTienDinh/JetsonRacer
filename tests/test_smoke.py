@@ -950,6 +950,51 @@ def test_tuning_saved_thresholds_survive_colour_switch():
     assert engine.lane.hsv_low_2 is None, 'preset trang khong co dai hue thu hai'
 
 
+def test_tuning_engine_soft_start_ramps_throttle():
+    """Bam CHAY khong duoc cho ga nhay thang len muc chay.
+
+    Ga nhay tu 0 len v_max lam banh truot va nguoi bam khong kip phan ung neu
+    chieu lai dang sai - dung luc nguy hiem nhat.
+    """
+    engine = LaneTuningEngine(CONFIG)
+    engine.set_param('lane.line_color', 'white')
+    engine.soft_start_s = 1.0
+    src = SyntheticSource(n_frames=5)
+    ok, frame = src.read()
+    assert ok
+
+    # Chua chay -> preview hien ga day du, khong ramp
+    full = engine.process(frame, 0.05)['throttle']
+    assert full > 0.0
+
+    t0 = 1000.0
+    engine.start_run(now=t0)
+    assert engine.running
+    values = [engine.process(frame, 0.05, now=t0 + e)['throttle']
+              for e in (0.0, 0.25, 0.5, 1.0, 2.0)]
+    assert values[0] == 0.0, 'ga phai bat dau tu 0'
+    for i in range(1, 4):
+        assert values[i] > values[i - 1], 'ga phai tang dan: %r' % (values,)
+    assert abs(values[3] - full) < 1e-6, 'sau soft_start_s phai dat ga day du'
+    assert abs(values[4] - full) < 1e-6
+
+    engine.stop_run()
+    assert not engine.running
+    assert abs(engine.process(frame, 0.05)['throttle'] - full) < 1e-6
+
+
+def test_tuning_engine_soft_start_disabled_is_immediate():
+    engine = LaneTuningEngine(CONFIG)
+    engine.set_param('lane.line_color', 'white')
+    engine.soft_start_s = 0.0
+    src = SyntheticSource(n_frames=3)
+    ok, frame = src.read()
+    assert ok
+    full = engine.process(frame, 0.05)['throttle']
+    engine.start_run(now=500.0)
+    assert abs(engine.process(frame, 0.05, now=500.0)['throttle'] - full) < 1e-6
+
+
 def test_rolling_stats_window_and_flip_count():
     stats = RollingStats(window=5)
     for value in (0.1, -0.1, 0.1, -0.1, 0.1, -0.1, 0.1):
