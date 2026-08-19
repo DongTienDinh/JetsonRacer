@@ -55,10 +55,18 @@ manual:
   max_steering: 0.60
   steering_expo: 0.45
   steering_slew_rate: 1.5  # don vi lenh / giay; 0 -> khong gioi han
+  # Vung chet quanh vi tri giua cua can gat. Can gamepad hiem khi ve dung 0.
+  deadzone: 0.08
   min_throttle: 0.12
   max_throttle: 0.30
   throttle_rise_rate: 1.2
   throttle_fall_rate: 4.0  # nha ga nhanh hon tang ga
+  # So anh/giay luu khi bam GHI DATA trong giao dien tune.
+  sample_hz: 10.0
+  # LUU Y: `max_steering` di qua DUNG chuoi gioi han cua che do tu dong:
+  #   max_steering x driver.steering_gain, roi clip o driver.steering_output_max
+  # Nang max_steering len 1.0 ma khong noi driver.steering_output_max thi bo goc
+  # chi tang tu 0.390 len 0.400 (do duoc) - gan nhu khong doi gi.
   test_throttle: 0.25
   record_video: true
   # MJPG dung CPU; 15 FPS giam tai Jetson nhung van du de doi chieu lai xe.

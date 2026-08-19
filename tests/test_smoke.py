@@ -40,7 +40,7 @@ from jetracer_baseline.perception.shading import (               # noqa: E402
 from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
 from jetracer_baseline.tuning_ui import (                        # noqa: E402
-    MODE_AUTO, MODE_MANUAL, MODE_STOP, ControllerShaper,
+    MANUAL_PARAMS, MODE_AUTO, MODE_MANUAL, MODE_STOP, ControllerShaper,
     LaneTuningEngine, RollingStats, _dict_diff)
 from jetracer_baseline.manual_collection import (                # noqa: E402
     CSV_FIELDS, DatasetSessionWriter, ManualDriveCollector, apply_deadzone,
@@ -1229,6 +1229,55 @@ def test_dataset_writer_ignores_duplicate_extra_field_names():
 def test_ui_drive_modes_are_distinct():
     """Ba che do phai khac nhau - tron lan la nguon goc cua 'tuong tay ma tu chay'."""
     assert len({MODE_STOP, MODE_MANUAL, MODE_AUTO}) == 3
+
+
+def test_manual_sliders_take_effect_without_restart():
+    """Keo slider bo goc/toc do phai an ngay, khong phai mo lai giao dien."""
+    cfg = _cfg()
+    shaper = ControllerShaper(cfg)
+
+    def settle(**kw):
+        shaper.reset()
+        out = (0.0, 0.0)
+        for _ in range(120):
+            out = shaper.shape(1.0, 1.0, 1.0 / 30.0, **kw)
+        return out
+
+    before_steer, before_throttle = settle()
+    cfg.set('manual.max_steering', 1.0)
+    cfg.set('manual.max_throttle', 0.45)
+    shaper.reset_from_config(cfg)
+    after_steer, after_throttle = settle()
+
+    assert after_steer > before_steer and abs(after_steer - 1.0) < 1e-6
+    assert after_throttle > before_throttle and abs(after_throttle - 0.45) < 1e-6
+
+
+def test_manual_config_change_does_not_zero_running_command():
+    """reset_from_config KHONG duoc dua lenh ve 0.
+
+    Neu keo mot slider ma lenh ve 0 thi xe khuc ga giua chung moi lan chinh -
+    khong the tune trong luc dang lai.
+    """
+    cfg = _cfg()
+    shaper = ControllerShaper(cfg)
+    for _ in range(120):
+        shaper.shape(1.0, 1.0, 1.0 / 30.0)
+    steer_before, throttle_before = shaper.command
+    assert steer_before > 0 and throttle_before > 0
+
+    cfg.set('manual.max_steering', 0.8)
+    shaper.reset_from_config(cfg)
+    assert shaper.command == (steer_before, throttle_before)
+
+
+def test_every_manual_slider_has_a_config_value():
+    """Slider khong doc duoc gia tri se hien giua thang do - vi du deadzone 0.15
+    lam can gat gan nhu khong an."""
+    cfg = _cfg()
+    missing = [key for key, _l, _lo, _hi, _s in MANUAL_PARAMS
+               if cfg.get(key) is None]
+    assert not missing, 'thieu trong config: %s' % missing
 
 
 def test_rolling_stats_window_and_flip_count():

@@ -78,6 +78,21 @@ CONTROL_PARAMS = [
 ]
 
 
+# Slider rieng cho che do LAI TAY. Tach khoi CONTROL_PARAMS vi day la gioi han
+# cua NGUOI lai, khong lien quan gi den bo dieu khien tu dong - tron hai nhom se
+# lam nguoi dung chinh nham nhom khi dang lai tay.
+MANUAL_PARAMS = [
+    ('manual.max_steering', 'Bo goc toi da', 0.10, 1.00, 0.05),
+    ('manual.steering_expo', 'Do mem lai (expo)', 0.00, 0.90, 0.05),
+    ('manual.steering_slew_rate', 'Toc do doi lai', 0.5, 8.0, 0.1),
+    ('manual.max_throttle', 'Toc do toi da', 0.05, 0.60, 0.01),
+    ('manual.min_throttle', 'Ga khoi dong', 0.00, 0.40, 0.01),
+    ('manual.throttle_rise_rate', 'Toc do len ga', 0.2, 5.0, 0.1),
+    ('manual.throttle_fall_rate', 'Toc do nha ga', 0.5, 10.0, 0.5),
+    ('manual.deadzone', 'Vung chet can', 0.00, 0.30, 0.01),
+]
+
+
 class RollingStats(object):
     """Thong ke cua so truot - de bat loi, khong phai de bao cao ket qua.
 
@@ -333,7 +348,7 @@ class LaneTuningEngine(object):
 
     # ------------------------------------------------------------------ render
     def render_panel(self, result, fps=0.0, armed=False, width=None,
-                     driver_kind='dryrun', ui_mode=None):
+                     driver_kind='dryrun', ui_mode=None, override_cmd=None):
         """Panel 2x2: anh+mask, mask nhi phan, bird's-eye+fit, do thi CTE."""
         res = result['lane']
         proc = result['proc']
@@ -378,8 +393,22 @@ class LaneTuningEngine(object):
         top = np.hstack([overlay, binary])
         bottom = np.hstack([bev, chart])
         panel = np.vstack([top, bottom])
+        if override_cmd is not None:
+            # Dang LAI TAY: banner phai hien lenh NGUOI dang gui, khong phai
+            # lenh CV. Hien lenh CV luc do la sai su that - nguoi dung se tuong
+            # minh dang be lai 0.6 trong khi thuc te tay cam gui so khac.
+            man_steer, man_throttle = override_cmd
+            servo, servo_raw = servo_output_for(
+                man_steer, self.drv_gain, self.drv_offset,
+                self.drv_out_min, self.drv_out_max)
+            result = dict(result)
+            result['steer'] = man_steer
+            result['throttle'] = man_throttle
+            result['servo'] = servo
+            result['steer_clipped'] = False
+            result['servo_clipped'] = abs(servo_raw - servo) > 1e-6
         panel = _draw_banner(panel, res, result, fps, armed, driver_kind,
-                         ui_mode=ui_mode)
+                             ui_mode=ui_mode)
         if width:
             scale = float(width) / panel.shape[1]
             panel = cv2.resize(panel, (int(width), int(panel.shape[0] * scale)))
@@ -648,6 +677,8 @@ class LaneTuningUI(object):
         self._sliders = {}
         self.lane_box = self._build_sliders(LANE_PARAMS)
         self.control_box = self._build_sliders(CONTROL_PARAMS)
+        self.manual_box = self._build_sliders(MANUAL_PARAMS,
+                                              on_change=self._apply_manual)
 
         self.btn_open = widgets.Button(description='1. MO CAMERA',
                                        button_style='info')
@@ -696,7 +727,16 @@ class LaneTuningUI(object):
         self.use_shading.observe(self._on_shading_change, names='value')
 
     # ------------------------------------------------------------------ helpers
-    def _build_sliders(self, params):
+    def _apply_manual(self):
+        """Ap tham so tay cam ngay lap tuc.
+
+        KHONG goi shaper.reset(): reset se dua lenh ve 0 va xe khu ga giua chung
+        moi lan keo mot slider. `reset_from_config` chi doi gioi han, giu nguyen
+        lenh dang chay.
+        """
+        self.shaper.reset_from_config(self.engine.cfg)
+
+    def _build_sliders(self, params, on_change=None):
         w = self.widgets
         rows = []
         for key, label, lo, hi, step in params:
@@ -717,7 +757,7 @@ class LaneTuningUI(object):
                     continuous_update=False,
                     style={'description_width': '160px'},
                     layout=w.Layout(width='420px'))
-            slider.observe(self._make_setter(key), names='value')
+            slider.observe(self._make_setter(key, on_change), names='value')
             self._sliders[key] = slider
             rows.append(slider)
         return w.VBox(rows)
@@ -733,11 +773,21 @@ class LaneTuningUI(object):
             return preset['hsv_low_1'][2]
         if key == 'lane.min_blob_area':
             return preset['min_blob_area']
+        if key.startswith('manual.'):
+            # Lay mac dinh THAT cua ControllerShaper, khong lay giua thang do:
+            # giua thang do cua `deadzone` la 0.15 - qua lon, can gat gan nhu
+            # khong an.
+            attr = key.split('.', 1)[1]
+            value = getattr(self.shaper, attr, None)
+            if value is not None:
+                return value
         return (lo + hi) / 2.0
 
-    def _make_setter(self, key):
+    def _make_setter(self, key, on_change=None):
         def handler(change):
             self.engine.set_param(key, change['new'])
+            if on_change is not None:
+                on_change()
         return handler
 
     def _on_colour_change(self, change):
@@ -822,7 +872,9 @@ class LaneTuningUI(object):
                     panel = self.engine.render_panel(
                         result, fps=self._fps, armed=self._armed,
                         width=self.preview_width,
-                        driver_kind=self.driver_kind, ui_mode=self.mode)
+                        driver_kind=self.driver_kind, ui_mode=self.mode,
+                        override_cmd=(self._manual_command()
+                                      if self.mode == MODE_MANUAL else None))
                     data = self.engine.encode_jpeg(panel)
                     if data:
                         self.preview.value = data
@@ -847,6 +899,10 @@ class LaneTuningUI(object):
         if self._grabber is grabber:
             self._grabber = None
         self._set_status('camera da dung; bam MO CAMERA de mo lai')
+
+    def _manual_command(self):
+        with self._state_lock:
+            return (self._man_steer, self._man_throttle)
 
     def _metrics_html(self):
         s = self.engine.stats.summary()
@@ -1373,6 +1429,12 @@ class LaneTuningUI(object):
             w.HBox([self.steering_axis, self.throttle_axis,
                     self.invert_steering, self.invert_throttle]),
             w.HBox([self.use_deadman, self.deadman_button]),
+            w.HTML('<hr><b>Bo goc va toc do khi LAI TAY</b><br>'
+                   '<small>Chi anh huong che do LAI TAY. Che do tu dong dung '
+                   'cac num trong tab "Dieu khien".<br>'
+                   '<b>Bo goc van bi hard-limit cua driver chan</b> giong che '
+                   'do tu dong - xem muc 6 trong notebook.</small>'),
+            self.manual_box,
             w.HTML('<hr><b>Thu data de train model</b>'),
             w.HBox([self.session_name, self.sample_hz]),
             w.HTML(
