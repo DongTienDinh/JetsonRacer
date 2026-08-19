@@ -23,6 +23,15 @@ camera:
   # Khoá auto-exposure/white-balance: đổi sáng giữa lúc chạy là rủi ro domain shift lớn nhất.
   lock_exposure: true
 
+  # Sửa lens shading màu (ám đỏ ở viền ảnh). Hệ số nằm ở configs/shading.yaml,
+  # sinh bằng: python tools/calib_shading.py --mode flatfield --source <video>
+  # enabled: false -> passthrough, KHÔNG đoán hệ số khi chưa hiệu chuẩn.
+  # PHẢI hiệu chuẩn lại nếu đổi camera, đổi ống kính hoặc đổi độ phân giải capture.
+  shading:
+    enabled: true
+    file: configs/shading.yaml
+    max_gain: 3.0
+
 pipeline:
   proc_width: 320          # ảnh xử lý được resize xuống cho nhanh
   proc_height: 240
@@ -54,17 +63,48 @@ manual:
   image_queue_size: 64
 
 lane:
+  # MỤC TIÊU BÁM: vạch ĐỨT ở CHÍNH GIỮA sa bàn (không phải viền lane).
+  mode: color_center       # color_center | gray (gray = bản cũ, giữ để so sánh)
+
+  # MÀU VẠCH GIỮA — đổi sa bàn thì đổi đúng dòng này, không sửa code:
+  #   red   : sa bàn tập hiện tại (vạch đứt đỏ trên sàn sáng)
+  #   white : sa bàn thi theo ĐB §3.2 ("lane màu tối, line trắng đứt khúc ở giữa")
+  line_color: red
+  # Bỏ trống -> dùng preset của line_color trong perception/lane.py.
+  # Chỉ khai đè khi đã đo trên sa bàn thật:
+  # hsv_low_1:  [0, 80, 70]
+  # hsv_high_1: [10, 255, 255]
+  # hsv_low_2:  [170, 80, 70]
+  # hsv_high_2: [180, 255, 255]
+
   # ROI: chỉ lấy phần dưới ảnh (mặt đường ngay trước xe)
   roi_top: 0.55            # tỉ lệ chiều cao, tính từ trên xuống
   roi_bottom: 1.0
   # Bird's-eye warp: 4 điểm nguồn theo tỉ lệ (x, y) của ảnh proc
+  # Warp làm các nét đứt ở xa to lên: band hợp lệ tăng 4.0/10 -> 7.5/10.
   warp_src: [[0.10, 1.00], [0.90, 1.00], [0.62, 0.58], [0.38, 0.58]]
   warp_dst_margin: 0.25
-  # Lane tối, vạch giữa trắng đứt khúc -> tách bằng ngưỡng sáng thích nghi
+
+  # --- Bám vạch đứt theo dải ngang ---
+  n_bands: 10              # số dải chia dọc ảnh warp
+  band_min_pixels: 25      # dải ít pixel hơn ngưỡng này = đang ở khoảng trống giữa 2 nét
+  min_bands: 2             # dưới ngưỡng này mới coi là MẤT VẠCH (min_pixels cũ không bao giờ kích hoạt)
+  max_run_frac: 0.45       # cụm cột rộng hơn 45% ảnh = viền lane, không phải vạch đứt
+  max_jump_frac: 0.35      # cụm cách vị trí dự đoán quá xa = bắt nhầm vật khác
+  lookahead: 0.6           # điểm ngắm xa (0 = ngay trước xe, 1 = xa nhất trong ROI)
+                           # Tự động kẹp về vùng THỰC SỰ nhìn thấy vạch — không
+                           # ngoại suy đa thức ra ngoài dữ liệu.
+  smooth_alpha: 0.6        # EMA cho cte, giảm giật
+  # Khử nhiễu theo DIỆN TÍCH blob, KHÔNG dùng MORPH_OPEN (erode xoá vạch mảnh).
+  # Bỏ trống -> lấy mặc định theo line_color: red=25, white=12.
+  # PHẢI đo lại trên sa bàn thật — ngưỡng này phụ thuộc bề rộng vạch và proc_width.
+  # min_blob_area: 25
+  morph_close: 3           # nối lại một nét đứt bị rách đôi
+
+  # --- Chỉ dùng khi mode: gray ---
   threshold_block: 31
   threshold_c: -12
-  min_pixels: 60           # dưới ngưỡng này coi như mất lane
-  smooth_alpha: 0.6        # EMA cho cte, giảm giật
+  min_pixels: 60
 
 stopline:
   roi_top: 0.72
@@ -78,10 +118,15 @@ control:
     kd: 0.10
     out_limit: 1.0
   steer_max: 0.60
-  v_max: 0.20              # THẤP có chủ ý. Chốt lại bằng thí nghiệm E3.
+  # Đánh lái sớm khi vào cua: error = (1-w)*cte + w*cte_lookahead.
+  # w = 0 -> chỉ sửa khi đã lệch (hay bị cắt cua muộn). w cao -> vào cua sớm hơn.
+  steer_lookahead_weight: 0.5
+  v_max: 0.20              # Chốt lại bằng thí nghiệm E3 trên sa bàn thật.
   v_min: 0.10
-  # Giảm tốc khi lệch nhiều hoặc cua gấp: v = v_max - slowdown*|cte|
+  # Ga thích nghi: v = v_max - slowdown*|cte| - curve_slowdown*|curvature|
+  # Vào cua thì tự bỏ ga TRƯỚC khi lệch, không đợi CTE tăng rồi mới giảm.
   slowdown: 0.12
+  curve_slowdown: 0.35
   reverse_throttle: -0.15  # dùng khi thoát kẹt
   driver:
     # Xe BTC/Waveshare co mot PCA9685 o 0x40. Dieu khien truc tiep de tranh

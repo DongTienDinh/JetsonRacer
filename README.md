@@ -70,6 +70,20 @@ python3 tools/check_hardware.py --driver nvidia --actuator \
 Preflight sẽ từ chối test actuator nếu Jetson không ở power mode 5W. Thiết lập
 bằng `sudo nvpmodel -m 1`, rồi xác nhận lại với `nvpmodel -q`.
 
+Hiệu chuẩn lens shading màu (**làm trước khi tune bất kỳ ngưỡng màu nào**) —
+camera CSI của xe đỏ gấp ~1.6 lần ở góc ảnh so với tâm ảnh, nên một ngưỡng HSV
+duy nhất không dùng được cho cả khung hình nếu chưa sửa:
+
+```bash
+python3 tools/collect_dataset.py --mode video --source csi --session flatfield --out data/calib --seconds 15
+```
+
+```bash
+python tools/calib_shading.py --mode flatfield --source data/calib/flatfield_<ts>.avi --preview reports/shading.png
+```
+
+Quy trình đầy đủ kèm tiêu chí đạt bằng số: [docs/quy-trinh-thu-data-sa-ban.md](docs/quy-trinh-thu-data-sa-ban.md).
+
 Tune ngưỡng bám lane trên sa bàn thật (xuất ảnh 4 ô từng bước xử lý):
 
 ```bash

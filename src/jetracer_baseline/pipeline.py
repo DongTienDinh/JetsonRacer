@@ -28,6 +28,7 @@ from .control.driver import build_driver
 from .control.pid import PID
 from .logging_csv import RunLogger
 from .perception.lane import LaneDetector
+from .perception.shading import ShadingCorrector
 from .perception.signs import SignTracker, build_detector
 from .perception.stopline import StoplineDetector
 from .recorder import FrameRecorder
@@ -147,6 +148,12 @@ class Runner(object):
             self.grabber.stop()
             raise RuntimeError('Camera/source khong khoi dong duoc: %s' %
                                startup_error)
+        # Sua lens shading mau TRUOC moi khau nhan dien. Camera CSI cua xe do
+        # gap ~1.6 lan o goc anh so voi tam (do tren raw_camera.avi); mot nguong
+        # mau duy nhat khong the dung cho ca khung hinh neu khong sua truoc.
+        self.shading = ShadingCorrector.from_config(cfg)
+        self.proc_size = (int(cfg.get('pipeline.proc_width', 320)),
+                          int(cfg.get('pipeline.proc_height', 240)))
         self.lane = LaneDetector(cfg)
         self.stopline = StoplineDetector(cfg)
         self.tracker = SignTracker(cfg)
@@ -188,6 +195,9 @@ class Runner(object):
         self.v_max = float(cfg.get('control.v_max', 0.2))
         self.v_min = float(cfg.get('control.v_min', 0.1))
         self.slowdown = float(cfg.get('control.slowdown', 0.12))
+        self.curve_slowdown = float(cfg.get('control.curve_slowdown', 0.35))
+        self.steer_look_w = float(
+            cfg.get('control.steer_lookahead_weight', 0.5))
         self.steer_max = float(cfg.get('control.steer_max', 1.0))
         self.control_period = 1.0 / float(cfg.get('pipeline.control_hz', 30))
 
@@ -227,9 +237,13 @@ class Runner(object):
                     self.recorder.submit(frame, frame_id)
 
                 # ---- Perception -------------------------------------------
-                lane_res = self.lane.process(frame)
-                stop_res = self.stopline.process(frame) if self.task == 'smartcity' else None
-                moving, _ = self.motion.update(frame)
+                # Frame THO da duoc ghi o tren; tu day tro di dung frame da sua
+                # mau. Ghi tho co chu dich: con hieu chuan lai shading duoc tu
+                # video cu, con neu ghi anh da sua thi mat goc, khong lam lai duoc.
+                proc = self.shading.apply_resized(frame, self.proc_size)
+                lane_res = self.lane.process(proc)
+                stop_res = self.stopline.process(proc) if self.task == 'smartcity' else None
+                moving, _ = self.motion.update(proc)
 
                 dets, det_fps = self.worker.get()
                 stable = self.tracker.update(dets, now=loop_t0)
@@ -250,15 +264,25 @@ class Runner(object):
                     steer = cmd.steer_override
                     self.pid.reset()
                 else:
-                    steer = self.pid.step(lane_res.cte, dt)
+                    # Tron lech tai muc xe voi lech tai diem ngam xa. Chi dung
+                    # cte thi xe luon sua MUON o cua: den luc CTE tang du de PID
+                    # phan ung thi xe da an vao mep lane roi.
+                    err = ((1.0 - self.steer_look_w) * lane_res.cte
+                           + self.steer_look_w * lane_res.cte_lookahead)
+                    steer = self.pid.step(err, dt)
                 steer = max(-self.steer_max, min(self.steer_max, steer))
 
                 if cmd.force_stop:
                     throttle = 0.0
                 else:
-                    speed = self.v_max - self.slowdown * abs(lane_res.cte)
-                    speed = max(self.v_min, speed) * cmd.throttle_scale
-                    throttle = speed
+                    # Bo ga theo CA do lech VA do cong. Do cong bao truoc khuc
+                    # cua nen ga giam TRUOC khi xe kip lech - dung yeu cau "vao
+                    # cua phu hop" thay vi phanh khi da lech roi.
+                    speed = (self.v_max
+                             - self.slowdown * abs(lane_res.cte)
+                             - self.curve_slowdown * abs(lane_res.curvature))
+                    speed = max(self.v_min, min(self.v_max, speed))
+                    throttle = speed * cmd.throttle_scale
                 self.driver.set(steer, throttle)
 
                 # ---- Log ---------------------------------------------------
@@ -289,6 +313,11 @@ class Runner(object):
                     decision=cmd.decision,
                     control_output='steer=%.3f;throttle=%.3f' % (steer, throttle),
                     cte=lane_res.cte,
+                    cte_lookahead=lane_res.cte_lookahead,
+                    curvature=lane_res.curvature,
+                    lane_found=lane_res.found,
+                    n_bands=lane_res.n_bands,
+                    throttle=throttle,
                     state=cmd.state,
                     event=(pending_event or cmd.event),
                 )

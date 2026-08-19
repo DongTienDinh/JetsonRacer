@@ -25,6 +25,12 @@ FIELDS = [
     'decision',
     'control_output',
     'cte',
+    # Them cho bam vach dut: du de danh gia lai ca luot chay ma khong can video.
+    'cte_lookahead',   # lech tai diem ngam xa -> giai thich vi sao danh lai som
+    'curvature',       # do cong -> giai thich vi sao bo ga
+    'lane_found',      # 0/1
+    'n_bands',         # so dai tim thay vach; 0-1 = sap mat vach
+    'throttle',        # tach rieng khoi control_output de ve bieu do nhanh
     'state',
     'event',
 ]
@@ -71,6 +77,26 @@ class RunLogger(object):
             'decision': _clean(kwargs.get('decision', '')),
             'control_output': _clean(kwargs.get('control_output', '')),
             'cte': '%.4f' % float(kwargs.get('cte', 0.0)),
+            'cte_lookahead': (
+                '' if kwargs.get('cte_lookahead') is None
+                else '%.4f' % float(kwargs['cte_lookahead'])
+            ),
+            'curvature': (
+                '' if kwargs.get('curvature') is None
+                else '%.4f' % float(kwargs['curvature'])
+            ),
+            'lane_found': (
+                '' if kwargs.get('lane_found') is None
+                else ('1' if kwargs['lane_found'] else '0')
+            ),
+            'n_bands': (
+                '' if kwargs.get('n_bands') is None
+                else '%d' % int(kwargs['n_bands'])
+            ),
+            'throttle': (
+                '' if kwargs.get('throttle') is None
+                else '%.3f' % float(kwargs['throttle'])
+            ),
             'state': _clean(kwargs.get('state', '')),
             'event': _clean(kwargs.get('event', '')),
         }

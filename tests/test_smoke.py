@@ -31,6 +31,8 @@ from jetracer_baseline.config import load_config                 # noqa: E402
 from jetracer_baseline.control.pid import PID                    # noqa: E402
 from jetracer_baseline.control import driver as driver_mod       # noqa: E402
 from jetracer_baseline.perception.lane import LaneDetector       # noqa: E402
+from jetracer_baseline.perception.shading import (               # noqa: E402
+    ShadingCorrector, fit_coefficients, measure_ratio_profile)
 from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
 from jetracer_baseline.manual_collection import (                # noqa: E402
@@ -689,19 +691,166 @@ def test_manual_collector_preview_control_and_recording():
 
 
 def test_lane_detector_tracks_synthetic_road():
-    cfg = _cfg()
+    """CTE phai BAM theo tam duong, khong chi nam trong [-1, 1].
+
+    Ban test cu chi assert `-1 <= cte <= 1` va `found >= 30/40` - mot detector
+    tra ve hang so 0.0 van pass. Nguon tong hop uon theo sin nen co ground truth
+    thuc su; kiem tra tuong quan moi bat duoc loi bam nham vach.
+    """
+    # Nguon tong hop mo phong sa ban THI: vach trang dut khuc tren lane toi.
+    cfg = _cfg(lane__line_color='white')
     det = LaneDetector(cfg)
-    src = SyntheticSource(n_frames=40)
-    found = 0
-    for _ in range(40):
+    src = SyntheticSource(n_frames=120)
+
+    got, truth, found = [], [], 0
+    for i in range(120):
         ok, frame = src.read()
         assert ok
         res = det.process(frame)
         assert -1.0 <= res.cte <= 1.0
         if res.found:
             found += 1
-    # Duong tong hop ro rang -> phai bat duoc phan lon frame
-    assert found >= 30
+        got.append(res.cte)
+        # SyntheticSource: center = w/2 + sin(i*0.05 + depth*1.2) * w*0.18
+        # tai day anh (depth = 1) -> lech chuan hoa = sin(i*0.05 + 1.2) * 0.36
+        truth.append(np.sin(i * 0.05 + 1.2) * 0.36)
+
+    assert found >= 110, 'chi bat duoc vach o %d/120 frame' % found
+
+    got = np.array(got)
+    truth = np.array(truth)
+    assert got.std() > 0.02, 'cte gan nhu khong doi - detector khong bam gi ca'
+    corr = float(np.corrcoef(got, truth)[0, 1])
+    assert corr > 0.9, 'cte khong bam tam duong (tuong quan chi %.3f)' % corr
+
+
+def test_lane_detector_ignores_wrong_colour_line():
+    """Doi mau vach ma detector van "tim thay" nghia la no dang bam nham thu khac."""
+    cfg = _cfg(lane__line_color='red')      # nguon tong hop chi co vach TRANG
+    det = LaneDetector(cfg)
+    src = SyntheticSource(n_frames=40)
+    found = 0
+    for _ in range(40):
+        ok, frame = src.read()
+        assert ok
+        if det.process(frame).found:
+            found += 1
+    assert found <= 4, 'bat duoc vach do o %d/40 frame nhung anh khong co mau do' % found
+
+
+def test_lane_detector_survives_dash_gaps():
+    """Vach DUT: khong duoc bao mat vach chi vi dang o giua hai net."""
+    cfg = _cfg(lane__line_color='white')
+    det = LaneDetector(cfg)
+    src = SyntheticSource(n_frames=60)
+    lost = 0
+    for _ in range(60):
+        ok, frame = src.read()
+        assert ok
+        if not det.process(frame).found:
+            lost += 1
+    assert lost <= 3, 'mat vach %d/60 frame tren duong lien mach' % lost
+
+
+def test_lane_curvature_and_lookahead_do_not_saturate():
+    """Do cong phai nam trong vung dung duoc, khong ghim +-1.
+
+    Bam +-1 nghia la da thuc dang duoc NGOAI SUY ra ngoai vung nhin thay vach;
+    khi do ga se tut ve v_min suot luot chay va xe bo het toc do.
+    """
+    cfg = _cfg(lane__line_color='white')
+    det = LaneDetector(cfg)
+    src = SyntheticSource(n_frames=120)
+    curvs, looks = [], []
+    for _ in range(120):
+        ok, frame = src.read()
+        assert ok
+        res = det.process(frame)
+        if res.found:
+            curvs.append(abs(res.curvature))
+            looks.append(abs(res.cte_lookahead))
+    assert curvs, 'khong frame nao tim thay vach'
+    saturated = float(np.mean([c >= 0.999 for c in curvs]))
+    assert saturated < 0.10, 'do cong bao hoa o %.0f%% frame' % (100 * saturated)
+    assert float(np.mean([l >= 0.999 for l in looks])) < 0.10
+
+
+def _synthetic_shaded_frame(w=160, h=120, rg_corner=1.6, bg_corner=1.2):
+    """Anh xam trung tinh bi am do dan ve goc - gia lap dung lens shading that."""
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    r2 = (((xx - cx) / cx) ** 2 + ((yy - cy) / cy) ** 2) / 2.0
+    base = 120.0
+    img = np.zeros((h, w, 3), np.float64)
+    img[:, :, 1] = base
+    img[:, :, 2] = base * (1.0 + (rg_corner - 1.0) * r2)
+    img[:, :, 0] = base * (1.0 + (bg_corner - 1.0) * r2)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def test_shading_corrector_flattens_measured_colour_cast():
+    """Hieu chuan tren anh am do -> sau khi sua, R/G phai phang gan 1.0."""
+    frame = _synthetic_shaded_frame()
+    before = measure_ratio_profile(frame.astype(np.float64), n_bins=6)
+    spread_before = max(p['rg'] for p in before) - min(p['rg'] for p in before)
+    assert spread_before > 0.3, 'anh test phai co am mau ro ret'
+
+    coeff_r, coeff_b = fit_coefficients(before)
+    corrector = ShadingCorrector(coeff_r, coeff_b, enabled=True)
+    after = measure_ratio_profile(
+        corrector.apply(frame).astype(np.float64), n_bins=6)
+    spread_after = max(p['rg'] for p in after) - min(p['rg'] for p in after)
+
+    assert spread_after < 0.2 * spread_before, (
+        'bien do R/G chi giam tu %.3f xuong %.3f' % (spread_before, spread_after))
+
+
+def test_shading_is_off_unless_config_asks():
+    """Mac dinh phai TAT. Sua mau am tham lam moi nguong da tune lech vo hinh."""
+    from jetracer_baseline.config import Config
+
+    frame = _synthetic_shaded_frame(w=40, h=40)
+    off = ShadingCorrector.from_config(Config({}))
+    assert off.enabled is False
+    assert np.array_equal(off.apply(frame), frame)
+
+    off2 = ShadingCorrector.from_config(
+        Config({'camera': {'shading': {'enabled': False}}}))
+    assert np.array_equal(off2.apply(frame), frame)
+
+    try:
+        ShadingCorrector.from_config(Config(
+            {'camera': {'shading': {'enabled': True,
+                                    'file': 'khong-ton-tai-abcxyz.yaml'}}}))
+    except IOError:
+        pass
+    else:
+        raise AssertionError('phai bao loi khi bat shading ma chua hieu chuan')
+
+
+def test_shading_apply_resized_matches_apply():
+    """Duong nhanh (resize truoc) phai cho cung ket qua voi duong thuong."""
+    corrector = ShadingCorrector.from_config(_cfg())
+    if not corrector.enabled:
+        return
+    big = _synthetic_shaded_frame(w=320, h=240)
+    assert np.array_equal(corrector.apply(big),
+                          corrector.apply_resized(big, (320, 240)))
+    out = corrector.apply_resized(_synthetic_shaded_frame(w=640, h=480), (320, 240))
+    assert out.shape == (240, 320, 3)
+
+
+def test_shading_preserves_brightness_and_does_not_clip():
+    """Chi doi mau, khong doi do sang -> khong duoc lam chay vung sang."""
+    corrector = ShadingCorrector.from_config(_cfg())
+    if not corrector.enabled:
+        return
+    frame = _synthetic_shaded_frame(w=160, h=120)
+    out = corrector.apply(frame)
+    mean_before, mean_after = float(frame.mean()), float(out.mean())
+    assert abs(mean_after - mean_before) / mean_before < 0.15, (
+        'do sang trung binh doi tu %.1f sang %.1f' % (mean_before, mean_after))
+    assert float(np.mean(out >= 255)) < 0.01, 'qua nhieu pixel bi chay'
 
 
 def test_sign_tracker_needs_votes():

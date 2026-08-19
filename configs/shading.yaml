@@ -1,0 +1,18 @@
+coeff_b:
+- 0.12037850519651394
+- 0.35560726598600906
+- -0.32269494693156087
+coeff_r:
+- 0.5716804616436082
+- 1.0655495232498764
+- -1.1510539097804782
+enabled: true
+max_gain: 3.0
+meta:
+  frames: 1485
+  mode: drive
+  resolution: 300x300
+  rg_spread_after: 0.0632
+  rg_spread_before: 0.5726
+  source: raw_camera.avi
+  symmetry_ok: true
