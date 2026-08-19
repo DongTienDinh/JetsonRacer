@@ -469,8 +469,66 @@ class LatestFrameGrabber(object):
             self._thread.join(timeout=0.5)
 
 
+class ShadedSource(FrameSource):
+    """Boc mot FrameSource, sua lens shading mau NGAY khi doc frame.
+
+    Vi sao dat o day chu khong o tung noi tieu thu: camera co BON ho tieu thu
+    (bam vach, preview, ghi video, ghi anh dataset). Sua o tung cho thi som muon
+    cung co cho quen - va cho quen do lai chinh la anh di train model. Boc o
+    nguon thi khong the quen: moi frame ra khoi camera deu da sach.
+
+    Danh doi da biet va chap nhan:
+      - Ton them CPU vi sua o do phan giai day (640x480) thay vi 320x240.
+      - Anh/video ghi ra la anh DA SUA, nen khong hieu chuan lai shading tu
+        chung duoc nua. Muon hieu chuan lai phai quay flat-field moi
+        (tools/calib_shading.py --mode flatfield). He so dang dung duoc ghi
+        vao metadata cua session de con truy nguoc.
+    """
+
+    def __init__(self, source, corrector):
+        self.source = source
+        self.corrector = corrector
+
+    def read(self):
+        ok, frame = self.source.read()
+        if not ok or frame is None:
+            return ok, frame
+        return ok, self.corrector.apply(frame)
+
+    def release(self):
+        self.source.release()
+
+    def __getattr__(self, name):
+        # Chuyen tiep `backend`, `startup_notes`, ... cho nguon that.
+        return getattr(self.source, name)
+
+
+def shading_applied_at_source(cfg):
+    """True khi camera tu tra ve frame da sua mau."""
+    if not bool(cfg.get('camera.shading.enabled', False)):
+        return False
+    return str(cfg.get('camera.shading.apply_at', 'source')) == 'source'
+
+
 def build_source(cfg, kind, video_path=None, n_frames=None):
-    """kind: 'csi' | 'video' | 'synthetic'."""
+    """kind: 'csi' | 'video' | 'synthetic'.
+
+    Neu `camera.shading.apply_at == 'source'` (mac dinh) thi nguon duoc boc bang
+    ShadedSource -> MOI frame doc ra da sach vien do, ke ca frame di vao anh
+    dataset va video.
+    """
+    source = _build_raw_source(cfg, kind, video_path, n_frames)
+    if not shading_applied_at_source(cfg):
+        return source
+    from .perception.shading import ShadingCorrector
+    corrector = ShadingCorrector.from_config(cfg)
+    if not corrector.enabled:
+        return source
+    return ShadedSource(source, corrector)
+
+
+def _build_raw_source(cfg, kind, video_path=None, n_frames=None):
+    """Nguon THO, chua sua mau. Dung khi hieu chuan shading."""
     if kind == 'video':
         if not video_path:
             raise ValueError('kind=video can --video <duong dan>')

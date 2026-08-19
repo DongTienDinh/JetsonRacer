@@ -26,8 +26,9 @@ sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from jetracer_baseline import fsm as fsm_mod                     # noqa: E402
 from jetracer_baseline.camera import (                          # noqa: E402
-    CSISource, LatestFrameGrabber, SyntheticSource,
-    gstreamer_pipeline)
+    CSISource, LatestFrameGrabber, ShadedSource, SyntheticSource,
+    _build_raw_source, build_source, gstreamer_pipeline,
+    shading_applied_at_source)
 from jetracer_baseline.config import load_config                 # noqa: E402
 from jetracer_baseline.control.corner import (                   # noqa: E402
     CORNER, STRAIGHT, CornerController)
@@ -1248,6 +1249,85 @@ def test_dict_diff_ignores_unchanged_nested_keys():
     assert _dict_diff(base, {'a': {'b': 1, 'c': 2}, 'd': 3}) == {}
     assert _dict_diff(base, {'a': {'b': 9, 'c': 2}, 'd': 3}) == {'a': {'b': 9}}
     assert _dict_diff(base, {'a': {'b': 1, 'c': 2}, 'd': 3, 'e': 5}) == {'e': 5}
+
+
+def test_shading_apply_returns_fresh_array_each_call():
+    """apply() KHONG duoc tra buffer dung chung.
+
+    recorder va dataset writer xep frame vao hang doi roi ghi dia o thread khac.
+    Neu apply() tra ve cung mot buffer thi cac frame dang xep hang bi frame sau
+    ghi de - anh luu ra dia se sai noi dung ma khong co loi nao bao.
+    """
+    corrector = ShadingCorrector.from_config(_cfg())
+    if not corrector.enabled:
+        return
+    frame = _synthetic_shaded_frame(w=64, h=48)
+
+    first = corrector.apply(frame)
+    second = corrector.apply(frame)
+    assert first is not second, 'apply() tra ve cung mot doi tuong buffer'
+    assert np.array_equal(first, second)
+
+    # Sua ket qua truoc khong duoc anh huong lan goi sau
+    first[:] = 0
+    third = corrector.apply(frame)
+    assert np.array_equal(third, second)
+
+
+def test_shading_at_source_wraps_and_cleans_every_frame():
+    """apply_at=source -> MOI frame doc tu camera deu da sach, ke ca frame di
+    vao anh dataset va video."""
+    cfg = _cfg()
+    cfg.set('camera.shading.enabled', True)
+    cfg.set('camera.shading.apply_at', 'source')
+    assert shading_applied_at_source(cfg)
+
+    source = build_source(cfg, 'synthetic', n_frames=3)
+    assert isinstance(source, ShadedSource)
+    ok, frame = source.read()
+    source.release()
+    assert ok and frame is not None
+
+    raw = _build_raw_source(cfg, 'synthetic', n_frames=3)
+    assert not isinstance(raw, ShadedSource)
+    ok, raw_frame = raw.read()
+    raw.release()
+    assert ok
+    assert not np.array_equal(frame, raw_frame), (
+        'nguon boc ShadedSource ma frame khong khac frame tho')
+
+
+def test_shading_at_source_disables_pipeline_correction():
+    """Sua hai lan se day gain len binh phuong: anh xam thanh xanh la va moi
+    nguong mau da tune deu sai."""
+    cfg = _cfg()
+    cfg.set('camera.shading.enabled', True)
+
+    cfg.set('camera.shading.apply_at', 'source')
+    engine_src = LaneTuningEngine(CONFIG)
+    engine_src.set_param('camera.shading.enabled', True)
+    engine_src.set_param('camera.shading.apply_at', 'source')
+    engine_src.rebuild()
+    assert engine_src.shading.enabled is False, (
+        'nguon da sua ma pipeline con sua nua -> sua hai lan')
+
+    engine_pipe = LaneTuningEngine(CONFIG)
+    engine_pipe.set_param('camera.shading.enabled', True)
+    engine_pipe.set_param('camera.shading.apply_at', 'pipeline')
+    engine_pipe.rebuild()
+    assert engine_pipe.shading.enabled is True
+
+    # Du sua o dau, he so ghi vao metadata phai luon la he so dang co hieu luc
+    assert engine_src.shading_coeff_r == engine_pipe.shading_coeff_r
+
+
+def test_shading_disabled_source_is_not_wrapped():
+    cfg = _cfg()
+    cfg.set('camera.shading.enabled', False)
+    assert not shading_applied_at_source(cfg)
+    source = build_source(cfg, 'synthetic', n_frames=2)
+    assert not isinstance(source, ShadedSource)
+    source.release()
 
 
 def test_sign_tracker_needs_votes():

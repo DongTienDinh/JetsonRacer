@@ -31,6 +31,12 @@ camera:
     enabled: true
     file: configs/shading.yaml
     max_gain: 3.0
+    # source   = sửa ngay tại camera -> MỌI thứ đọc từ cam đều sạch viền đỏ:
+    #            bám vạch, preview, video ghi lại, VÀ ảnh dataset đi train.
+    # pipeline = chỉ sửa trong vòng xử lý; ảnh/video ghi ra là ảnh THÔ.
+    # Chọn 'source' thì không hiệu chuẩn lại shading từ video cũ được nữa —
+    # muốn hiệu chuẩn lại phải quay flat-field mới.
+    apply_at: source
 
 pipeline:
   proc_width: 320          # ảnh xử lý được resize xuống cho nhanh

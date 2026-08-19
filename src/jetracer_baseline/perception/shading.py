@@ -32,6 +32,7 @@ He so nam trong configs/shading.yaml, sinh boi tools/calib_shading.py.
 
 import io
 import os
+import threading
 
 import cv2
 import numpy as np
@@ -52,6 +53,12 @@ class ShadingCorrector(object):
         self.enabled = bool(enabled)
         self.max_gain = float(max_gain)
         self._cache = {}
+        # Buffer float dung lai giua cac frame. Doi voi 640x480 thi moi lan
+        # `astype(np.float32)` cap phat 3.7 MB moi; tai dung giam 4.4 ms xuong
+        # 2.5 ms/frame (do tren PC dev). Co khoa vi `apply()` co the bi goi tu
+        # thread camera lan thread khac.
+        self._scratch = {}
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ config
     @classmethod
@@ -140,17 +147,33 @@ class ShadingCorrector(object):
         return self._cache[key]
 
     # ------------------------------------------------------------------- apply
+    def _gain3(self, w, h):
+        key = ('g3', int(w), int(h))
+        if key not in self._cache:
+            g_b, g_g, g_r = self.maps_for(w, h)
+            self._cache[key] = np.ascontiguousarray(
+                np.dstack([g_b, g_g, g_r]).astype(np.float32))
+        return self._cache[key]
+
     def apply(self, bgr):
-        """Tra ve anh BGR uint8 da khu am mau vien. Passthrough neu chua bat."""
+        """Tra ve anh BGR uint8 MOI da khu am mau vien.
+
+        LUON tra mang moi, khong tra buffer dung chung: recorder va dataset
+        writer xep frame vao hang doi roi ghi dia o thread khac, tra buffer
+        dung chung se lam cac frame da xep hang bi ghi de bang frame sau.
+        """
         if not self.enabled:
             return bgr
         h, w = bgr.shape[:2]
-        g_b, g_g, g_r = self.maps_for(w, h)
-        out = bgr.astype(np.float32)
-        out[:, :, 0] *= g_b
-        out[:, :, 1] *= g_g
-        out[:, :, 2] *= g_r
-        return np.clip(out, 0.0, 255.0).astype(np.uint8)
+        gain = self._gain3(w, h)
+        with self._lock:
+            scratch = self._scratch.get((w, h))
+            if scratch is None or scratch.shape != bgr.shape:
+                scratch = np.empty(bgr.shape, np.float32)
+                self._scratch[(w, h)] = scratch
+            np.multiply(bgr, gain, out=scratch, casting='unsafe')
+            np.clip(scratch, 0.0, 255.0, out=scratch)
+            return scratch.astype(np.uint8)
 
     def apply_resized(self, bgr, size):
         """Resize ve `size` TRUOC roi moi sua mau - duong nong cua vong dieu khien.
@@ -165,12 +188,7 @@ class ShadingCorrector(object):
             bgr = cv2.resize(bgr, (w, h))
         if not self.enabled:
             return bgr
-        g_b, g_g, g_r = self.maps_for(w, h)
-        out = bgr.astype(np.float32)
-        out[:, :, 0] *= g_b
-        out[:, :, 1] *= g_g
-        out[:, :, 2] *= g_r
-        return np.clip(out, 0.0, 255.0).astype(np.uint8)
+        return self.apply(bgr)
 
     def describe(self):
         return 'ShadingCorrector(enabled=%s, coeff_r=%s, coeff_b=%s)' % (

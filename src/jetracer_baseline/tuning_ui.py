@@ -30,7 +30,8 @@ import cv2
 import numpy as np
 import yaml
 
-from .camera import LatestFrameGrabber, build_source, format_camera_environment
+from .camera import (LatestFrameGrabber, build_source,
+                     format_camera_environment, shading_applied_at_source)
 from .config import load_config
 from .control.corner import CornerController
 from .control.driver import build_driver
@@ -224,7 +225,19 @@ class LaneTuningEngine(object):
         # `lane.hsv_s_min` / `lane.hsv_v_min` duoc LaneDetector doc truc tiep va
         # ap len preset cua mau dang chon -> UI khong can (va khong duoc) ghi
         # thang dai HSV vao config.
-        self.shading = ShadingCorrector.from_config(cfg)
+        # Nguon da tu sua mau (camera.shading.apply_at = source) thi o day
+        # KHONG duoc sua nua - sua hai lan se day gain len binh phuong, anh xam
+        # thanh xanh la va moi nguong mau da tune deu sai.
+        if shading_applied_at_source(cfg):
+            self.shading = ShadingCorrector.disabled()
+            self.shading_at_source = True
+        else:
+            self.shading = ShadingCorrector.from_config(cfg)
+            self.shading_at_source = False
+        # Giu lai he so dang co hieu luc (du sua o dau) de ghi vao metadata.
+        _effective = ShadingCorrector.from_config(cfg)
+        self.shading_coeff_r = list(_effective.coeff_r)
+        self.shading_coeff_b = list(_effective.coeff_b)
         self.lane = LaneDetector(cfg)
         self.pid = PID(cfg.get('control.pid.kp', 0.6),
                        cfg.get('control.pid.ki', 0.0),
@@ -973,7 +986,12 @@ class LaneTuningUI(object):
             'camera': cfg.get('camera'),
             'lane': cfg.get('lane'),
             'control': cfg.get('control'),
+            # Truy nguoc duoc anh nay da bi sua mau bang he so nao. Khi
+            # sua tai nguon thi khong the do nguoc lai tu anh nua.
             'shading_enabled': bool(cfg.get('camera.shading.enabled', False)),
+            'shading_apply_at': cfg.get('camera.shading.apply_at', 'source'),
+            'shading_coeff_r': list(self.engine.shading_coeff_r),
+            'shading_coeff_b': list(self.engine.shading_coeff_b),
             'note': ('Anh la frame THO truoc khi sua mau/resize. '
                      'steering_cmd/throttle_cmd = lenh NGUOI lai (nhan de train). '
                      'cv_* = lenh CV truyen thong tren cung frame (de so sanh).'),

@@ -42,6 +42,7 @@ import numpy as np  # noqa: E402
 from jetracer_baseline.camera import build_source  # noqa: E402
 from jetracer_baseline.config import load_config   # noqa: E402
 from jetracer_baseline.perception.lane import LaneDetector
+from jetracer_baseline.camera import shading_applied_at_source
 from jetracer_baseline.perception.shading import ShadingCorrector  # noqa: E402
 
 
@@ -101,10 +102,18 @@ def run_once(cfg, source, frames, every, out_dir, tag):
     # PHAI sua mau truoc khi tune nguong, dung y het vong chay tren xe.
     # Tune tren anh chua sua se ra nguong bu lai cho am do o vien - roi khi chay
     # that (co sua mau) thi nguong do lai sai. Hai duong xu ly phai giong nhau.
-    shading = ShadingCorrector.from_config(cfg)
+    if shading_applied_at_source(cfg):
+        # build_source() da boc ShadedSource -> frame vao day da sach roi.
+        shading = ShadingCorrector.disabled()
+    else:
+        shading = ShadingCorrector.from_config(cfg)
     proc_size = (int(cfg.get('pipeline.proc_width', 320)),
                  int(cfg.get('pipeline.proc_height', 240)))
-    print('  shading: %s' % ('BAT' if shading.enabled else 'TAT (chua hieu chuan)'))
+    if shading_applied_at_source(cfg):
+        print('  shading: BAT tai NGUON camera (frame vao day da sach)')
+    else:
+        print('  shading: %s trong vong xu ly'
+              % ('BAT' if shading.enabled else 'TAT (chua hieu chuan)'))
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
 

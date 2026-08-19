@@ -23,7 +23,8 @@ import cv2
 import numpy as np
 
 from . import fsm as fsm_mod
-from .camera import LatestFrameGrabber, SyncGrabber
+from .camera import (LatestFrameGrabber, SyncGrabber,
+                     shading_applied_at_source)
 from .control.corner import CornerController
 from .control.driver import build_driver
 from .control.pid import PID
@@ -152,7 +153,13 @@ class Runner(object):
         # Sua lens shading mau TRUOC moi khau nhan dien. Camera CSI cua xe do
         # gap ~1.6 lan o goc anh so voi tam (do tren raw_camera.avi); mot nguong
         # mau duy nhat khong the dung cho ca khung hinh neu khong sua truoc.
-        self.shading = ShadingCorrector.from_config(cfg)
+        # Nguon da tu sua mau (camera.shading.apply_at = source) thi o day
+        # KHONG duoc sua nua - sua hai lan se day gain len binh phuong, anh xam
+        # thanh xanh la va moi nguong mau da tune deu sai.
+        if shading_applied_at_source(cfg):
+            self.shading = ShadingCorrector.disabled()
+        else:
+            self.shading = ShadingCorrector.from_config(cfg)
         self.proc_size = (int(cfg.get('pipeline.proc_width', 320)),
                           int(cfg.get('pipeline.proc_height', 240)))
         self.lane = LaneDetector(cfg)

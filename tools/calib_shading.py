@@ -143,6 +143,15 @@ def main(argv=None):
         print('  %.2f-%.2f    %8.3f %8.3f %10d' % (
             p['r2_lo'], p['r2_hi'], p['rg'], p['bg'], p['n']))
 
+    rg_now = [p['rg'] for p in profile]
+    if (max(rg_now) - min(rg_now)) < 0.08:
+        print('\nCANH BAO: bien do R/G da rat nho (%.3f). Video nay CO VE DA'
+              ' DUOC SUA MAU roi.' % (max(rg_now) - min(rg_now)))
+        print('  Neu camera.shading.apply_at = source thi moi video ghi ra deu'
+              ' da sach; hieu chuan tiep tren no se ra he so gan nhu vo hieu.')
+        print('  Hieu chuan lai phai quay flat-field MOI voi shading TAT'
+              ' (camera.shading.enabled: false).')
+
     coeff_r, coeff_b = fit_coefficients(profile)
     corrector = ShadingCorrector(coeff_r, coeff_b, enabled=True)
 

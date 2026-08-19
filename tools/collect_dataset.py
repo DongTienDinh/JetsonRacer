@@ -28,7 +28,8 @@ sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 import cv2  # noqa: E402
 
-from jetracer_baseline.camera import build_source  # noqa: E402
+from jetracer_baseline.camera import (  # noqa: E402
+    _build_raw_source, build_source, shading_applied_at_source)
 from jetracer_baseline.config import load_config   # noqa: E402
 
 
@@ -103,6 +104,24 @@ def record_video(source, out_dir, session, seconds, fps, show):
     return path
 
 
+
+def _pick_source(args, cfg, kind, video_path=None, n_frames=None):
+    """Chon nguon co / khong co sua mau.
+
+    Mac dinh camera.shading.apply_at = source nen build_source() tra ve frame DA
+    sua. Khi quay flat-field de hieu chuan lai shading thi phai lay anh THO,
+    neu khong ta se do lens shading cua mot camera da duoc bu shading - ket qua
+    la he so gan nhu vo hieu.
+    """
+    if args.raw:
+        print('  --raw: lay anh THO, KHONG sua mau shading.')
+        return _build_raw_source(cfg, kind, video_path, n_frames)
+    if shading_applied_at_source(cfg):
+        print('  Anh se duoc SUA MAU tai nguon (camera.shading.apply_at=source).')
+        print('  Dung --raw neu dang quay flat-field de hieu chuan shading.')
+    return build_source(cfg, kind, video_path=video_path, n_frames=n_frames)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Thu du lieu tu camera JetRacer')
     parser.add_argument('--config', default='configs/default.yaml')
@@ -119,10 +138,15 @@ def main(argv=None):
     parser.add_argument('--seconds', type=float, default=120.0, help='mode=video')
     parser.add_argument('--fps', type=float, default=20.0, help='mode=video')
     parser.add_argument('--show', action='store_true', help='Hien cua so xem truoc')
+    parser.add_argument(
+        '--raw', action='store_true',
+        help='Thu anh THO, BO QUA sua mau shading. BAT BUOC khi quay '
+             'flat-field de hieu chuan shading - hieu chuan tren anh da sua '
+             'se ra he so vo nghia.')
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
-    source = build_source(cfg, args.source, video_path=args.video)
+    source = _pick_source(args, cfg, args.source, video_path=args.video)
 
     try:
         if args.mode == 'video':

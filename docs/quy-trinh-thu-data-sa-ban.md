@@ -62,8 +62,13 @@ Yêu cầu: **một màu, sáng đều, phủ kín khung hình**.
 4. Kiểm tra preview: không được có vùng cháy trắng (255) và không có bóng đổ rõ.
 
 ```bash
-python3 tools/collect_dataset.py --mode video --source csi --session flatfield --out data/calib --seconds 15
+python3 tools/collect_dataset.py --mode video --source csi --session flatfield --out data/calib --seconds 15 --raw
 ```
+
+> **`--raw` là bắt buộc ở bước này.** `camera.shading.apply_at: source` làm mọi
+> frame ra khỏi camera đã được sửa màu sẵn. Hiệu chuẩn trên ảnh đã sửa = đo lens
+> shading của một camera đã được bù shading → hệ số ra gần như vô hiệu. `--raw`
+> bỏ qua lớp sửa và lấy đúng ảnh thô của cảm biến.
 
 Copy video về PC rồi chạy:
 
