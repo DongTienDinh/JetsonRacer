@@ -121,12 +121,31 @@ control:
   # Đánh lái sớm khi vào cua: error = (1-w)*cte + w*cte_lookahead.
   # w = 0 -> chỉ sửa khi đã lệch (hay bị cắt cua muộn). w cao -> vào cua sớm hơn.
   steer_lookahead_weight: 0.5
-  v_max: 0.20              # Chốt lại bằng thí nghiệm E3 trên sa bàn thật.
-  v_min: 0.10
-  # Ga thích nghi: v = v_max - slowdown*|cte| - curve_slowdown*|curvature|
-  # Vào cua thì tự bỏ ga TRƯỚC khi lệch, không đợi CTE tăng rồi mới giảm.
-  slowdown: 0.12
-  curve_slowdown: 0.35
+
+  # --- HAI MỨC GA: đoạn thẳng đi nhanh, vào cua bỏ ga ---
+  # Sa bàn có cua rất hẹp -> không dùng một v_max chung cho cả vòng.
+  v_straight: 0.30         # ga khi phía trước thẳng
+  v_corner: 0.12           # ga khi đang trong cua
+  # Hysteresis: vào cua ở ngưỡng cao, ra cua ở ngưỡng thấp. Một ngưỡng duy nhất
+  # sẽ làm ga bật/tắt liên tục khi độ cong dao động quanh nó.
+  # Đo trên raw_camera.avi: |curvature| p50=0.21, p75=0.39.
+  # enter 0.25 -> khoảng 43% thời gian được coi là cua trên sa bàn này.
+  curve_enter: 0.25
+  curve_exit: 0.15
+  # Lái feed-forward theo độ cong, cộng THẲNG vào đầu ra PID:
+  #   steer = PID(sai_số) + curve_feedforward * curvature
+  # PID chỉ sửa cái đã sai; feed-forward đánh lái ngay khi NHÌN THẤY đường cong.
+  # Trên cua hẹp đây là khác biệt giữa bám được và cắt cua.
+  curve_feedforward: 0.9
+  corner_steer_gain: 1.6   # trong chế độ CUA nhân thêm vào lái để bẻ gần hết
+  # Giới hạn tốc độ đổi ga: lên từ từ (bánh không trượt), xuống nhanh (thấy cua
+  # là bỏ ga ngay).
+  throttle_rise_rate: 0.8
+  throttle_fall_rate: 3.0
+
+  v_max: 0.35              # TRẦN an toàn tuyệt đối, không phải ga mục tiêu
+  v_min: 0.10              # sàn
+  slowdown: 0.12           # bỏ thêm ga theo |cte|
   reverse_throttle: -0.15  # dùng khi thoát kẹt
   driver:
     # Xe BTC/Waveshare co mot PCA9685 o 0x40. Dieu khien truc tiep de tranh

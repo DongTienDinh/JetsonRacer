@@ -6,8 +6,18 @@
 # trong khi đọc sai 1 biển mất ~10 điểm (BASELINE.md §1.3).
 
 control:
-  v_max: 0.32              # giá trị thật phải lấy từ thí nghiệm E3, không đoán
+  # Mô hình hai mức ga (xem control/corner.py). Lượt nhanh đẩy ga ĐOẠN THẲNG lên,
+  # KHÔNG đẩy ga trong cua: cua của sa bàn rất hẹp, vào nhanh là văng khỏi vạch.
+  v_straight: 0.42         # giá trị thật phải lấy từ thí nghiệm E3, không đoán
+  v_corner: 0.16
+  v_max: 0.50              # trần an toàn, nâng theo v_straight
   v_min: 0.14
+  # Vào cua nhanh hơn thì phải nhận ra cua SỚM hơn -> hạ ngưỡng vào.
+  curve_enter: 0.20
+  curve_exit: 0.12
+  curve_feedforward: 1.1   # tốc độ cao cần đánh lái sớm hơn nữa
+  corner_steer_gain: 1.7
+  throttle_fall_rate: 4.0  # bỏ ga dứt khoát hơn khi thấy cua
   slowdown: 0.18           # phanh mạnh hơn ở cua vì vào cua nhanh hơn
   pid:
     kp: 0.72

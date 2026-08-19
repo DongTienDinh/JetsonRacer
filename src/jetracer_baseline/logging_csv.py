@@ -31,6 +31,7 @@ FIELDS = [
     'lane_found',      # 0/1
     'n_bands',         # so dai tim thay vach; 0-1 = sap mat vach
     'throttle',        # tach rieng khoi control_output de ve bieu do nhanh
+    'drive_mode',      # THANG / CUA - giai thich vi sao ga cao hay thap
     'state',
     'event',
 ]
@@ -97,6 +98,7 @@ class RunLogger(object):
                 '' if kwargs.get('throttle') is None
                 else '%.3f' % float(kwargs['throttle'])
             ),
+            'drive_mode': _clean(kwargs.get('drive_mode', '')),
             'state': _clean(kwargs.get('state', '')),
             'event': _clean(kwargs.get('event', '')),
         }

@@ -24,6 +24,7 @@ import numpy as np
 
 from . import fsm as fsm_mod
 from .camera import LatestFrameGrabber, SyncGrabber
+from .control.corner import CornerController
 from .control.driver import build_driver
 from .control.pid import PID
 from .logging_csv import RunLogger
@@ -168,6 +169,9 @@ class Runner(object):
             cfg.get('control.pid.kd', 0.1),
             out_limit=cfg.get('control.pid.out_limit', 1.0),
         )
+        # Cung mot bo dieu khien voi giao dien tune -> tune xong chay that
+        # khong bi lech hanh vi.
+        self.corner = CornerController(cfg)
         self.driver = build_driver(driver_kind, cfg)
         self.fsm = fsm_mod.DecisionFSM(cfg, task=task)
         self.motion = MotionEstimator(
@@ -192,10 +196,6 @@ class Runner(object):
             self.recorder = FrameRecorder(
                 video_path, fps=float(cfg.get('pipeline.control_hz', 30)))
 
-        self.v_max = float(cfg.get('control.v_max', 0.2))
-        self.v_min = float(cfg.get('control.v_min', 0.1))
-        self.slowdown = float(cfg.get('control.slowdown', 0.12))
-        self.curve_slowdown = float(cfg.get('control.curve_slowdown', 0.35))
         self.steer_look_w = float(
             cfg.get('control.steer_lookahead_weight', 0.5))
         self.steer_max = float(cfg.get('control.steer_max', 1.0))
@@ -260,29 +260,24 @@ class Runner(object):
                 # so bi thoi phong nhieu lan va khong the bao ve truoc BTC.
                 if frames > 0:
                     self.fps_meter.tick(max(1e-6, dt))
-                if cmd.steer_override is not None:
-                    steer = cmd.steer_override
-                    self.pid.reset()
-                else:
-                    # Tron lech tai muc xe voi lech tai diem ngam xa. Chi dung
-                    # cte thi xe luon sua MUON o cua: den luc CTE tang du de PID
-                    # phan ung thi xe da an vao mep lane roi.
-                    err = ((1.0 - self.steer_look_w) * lane_res.cte
-                           + self.steer_look_w * lane_res.cte_lookahead)
-                    steer = self.pid.step(err, dt)
-                steer = max(-self.steer_max, min(self.steer_max, steer))
+                # Tron lech tai muc xe voi lech tai diem ngam xa. Chi dung
+                # cte thi xe luon sua MUON o cua: den luc CTE tang du de PID
+                # phan ung thi xe da an vao mep lane roi.
+                err = ((1.0 - self.steer_look_w) * lane_res.cte
+                       + self.steer_look_w * lane_res.cte_lookahead)
+                pid_out = self.pid.step(err, dt)
+                steer, throttle, drive_mode = self.corner.step(
+                    pid_out, lane_res.cte, lane_res.curvature, dt,
+                    lane_found=lane_res.found)
 
+                if cmd.steer_override is not None:
+                    steer = max(-self.steer_max,
+                                min(self.steer_max, cmd.steer_override))
+                    self.pid.reset()
                 if cmd.force_stop:
                     throttle = 0.0
                 else:
-                    # Bo ga theo CA do lech VA do cong. Do cong bao truoc khuc
-                    # cua nen ga giam TRUOC khi xe kip lech - dung yeu cau "vao
-                    # cua phu hop" thay vi phanh khi da lech roi.
-                    speed = (self.v_max
-                             - self.slowdown * abs(lane_res.cte)
-                             - self.curve_slowdown * abs(lane_res.curvature))
-                    speed = max(self.v_min, min(self.v_max, speed))
-                    throttle = speed * cmd.throttle_scale
+                    throttle *= cmd.throttle_scale
                 self.driver.set(steer, throttle)
 
                 # ---- Log ---------------------------------------------------
@@ -318,6 +313,7 @@ class Runner(object):
                     lane_found=lane_res.found,
                     n_bands=lane_res.n_bands,
                     throttle=throttle,
+                    drive_mode=drive_mode,
                     state=cmd.state,
                     event=(pending_event or cmd.event),
                 )

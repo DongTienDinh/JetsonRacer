@@ -32,10 +32,12 @@ import yaml
 
 from .camera import LatestFrameGrabber, build_source, format_camera_environment
 from .config import load_config
+from .control.corner import CornerController
 from .control.driver import build_driver
 from .control.pid import PID
 from .perception.lane import LaneDetector
 from .perception.shading import ShadingCorrector
+from .recorder import FrameRecorder
 
 
 # Cac tham so hien ra slider: (duong dan config, nhan, min, max, buoc)
@@ -55,14 +57,19 @@ LANE_PARAMS = [
 ]
 
 CONTROL_PARAMS = [
+    ('control.v_straight', 'Ga doan THANG', 0.00, 0.60, 0.01),
+    ('control.v_corner', 'Ga khi vao CUA', 0.00, 0.40, 0.01),
+    ('control.curve_enter', 'Nguong VAO cua', 0.05, 0.80, 0.01),
+    ('control.curve_exit', 'Nguong RA cua', 0.02, 0.70, 0.01),
+    ('control.curve_feedforward', 'Lai theo do cong', 0.0, 2.5, 0.05),
+    ('control.corner_steer_gain', 'Boi lai khi cua', 1.0, 3.0, 0.05),
+    ('control.steer_max', 'Lai toi da', 0.10, 1.00, 0.05),
     ('control.pid.kp', 'PID Kp', 0.0, 2.0, 0.05),
     ('control.pid.kd', 'PID Kd', 0.0, 1.0, 0.01),
     ('control.steer_lookahead_weight', 'Trong so diem ngam', 0.0, 1.0, 0.05),
-    ('control.steer_max', 'Lai toi da', 0.10, 1.00, 0.05),
-    ('control.v_max', 'Ga toi da', 0.00, 0.60, 0.01),
-    ('control.v_min', 'Ga toi thieu', 0.00, 0.40, 0.01),
     ('control.slowdown', 'Bo ga theo lech', 0.0, 1.0, 0.01),
-    ('control.curve_slowdown', 'Bo ga theo cua', 0.0, 1.5, 0.05),
+    ('control.v_min', 'Ga toi thieu', 0.00, 0.40, 0.01),
+    ('control.v_max', 'Tran ga (an toan)', 0.00, 0.80, 0.01),
 ]
 
 
@@ -155,6 +162,12 @@ class LaneTuningEngine(object):
                        cfg.get('control.pid.ki', 0.0),
                        cfg.get('control.pid.kd', 0.1),
                        out_limit=cfg.get('control.pid.out_limit', 1.0))
+        # Giu nguyen trang thai che do/ga khi keo slider: tao lai controller se
+        # dat ga ve 0 moi lan chinh mot num, xe giat lien tuc luc dang tune.
+        if getattr(self, 'corner', None) is None:
+            self.corner = CornerController(cfg)
+        else:
+            self.corner.reset_from_config(cfg)
         self.proc_size = (int(cfg.get('pipeline.proc_width', 320)),
                           int(cfg.get('pipeline.proc_height', 240)))
         self.v_max = float(cfg.get('control.v_max', 0.20))
@@ -170,6 +183,7 @@ class LaneTuningEngine(object):
         """Danh dau bat dau chay -> ga bat dau ramp tu 0."""
         self._run_t0 = time.time() if now is None else now
         self.pid.reset()
+        self.corner.reset()
 
     def stop_run(self):
         self._run_t0 = None
@@ -200,20 +214,16 @@ class LaneTuningEngine(object):
 
         err = ((1.0 - self.steer_look_w) * res.cte
                + self.steer_look_w * res.cte_lookahead)
-        steer = self.pid.step(err, dt)
-        steer = max(-self.steer_max, min(self.steer_max, steer))
-
-        speed = (self.v_max
-                 - self.slowdown * abs(res.cte)
-                 - self.curve_slowdown * abs(res.curvature))
-        throttle = max(self.v_min, min(self.v_max, speed))
+        pid_out = self.pid.step(err, dt)
+        steer, throttle, mode = self.corner.step(
+            pid_out, res.cte, res.curvature, dt, lane_found=res.found)
         ramp = self.soft_start_scale(now)
         throttle *= ramp
 
         self.stats.push(res.cte, steer, res.found, res.n_bands)
         return {
             'proc': proc, 'lane': res, 'steer': steer, 'throttle': throttle,
-            'error': err, 'ramp': ramp,
+            'error': err, 'ramp': ramp, 'mode': mode, 'pid': pid_out,
         }
 
     # ------------------------------------------------------------------ render
@@ -369,6 +379,13 @@ def _draw_banner(panel, res, result, fps, armed, driver_kind='dryrun'):
                 (8, 44), font, 0.42,
                 (120, 240, 120) if res.found else (60, 60, 255), 1)
 
+    # Che do lai o giua: nhin mot cai la biet vi sao ga dang cao hay thap.
+    mode = result.get('mode')
+    if mode:
+        corner = (mode != 'THANG')
+        cv2.putText(banner, mode, (int(width * 0.40), 44), font, 0.55,
+                    (0, 165, 255) if corner else (120, 240, 120), 2)
+
     right = [
         'cte=%+.3f  ngam=%+.3f  cong=%+.3f' % (
             res.cte, res.cte_lookahead, res.curvature),
@@ -404,7 +421,7 @@ class LaneTuningUI(object):
     def __init__(self, config_path='configs/default.yaml', source_kind='csi',
                  video_path=None, driver_kind='nvidia',
                  save_path='configs/tuned.yaml', preview_width=760,
-                 soft_start_s=1.0):
+                 soft_start_s=1.0, record_dir='logs', record_fps=15.0):
         try:
             import ipywidgets.widgets as widgets
         except ImportError:
@@ -434,6 +451,10 @@ class LaneTuningUI(object):
         self._thread = None
         self._driver_lock = threading.Lock()
         self._fps = 0.0
+        self.record_dir = record_dir
+        self.record_fps = float(record_fps)
+        self._recorder = None
+        self._record_lock = threading.Lock()
 
         self.preview = widgets.Image(format='jpeg', width=preview_width)
         self.status = widgets.HTML(value='<b>Trang thai:</b> chua mo camera')
@@ -468,6 +489,8 @@ class LaneTuningUI(object):
         self.btn_stop = widgets.Button(description='DUNG KHAN CAP',
                                        button_style='danger',
                                        layout=widgets.Layout(width='170px'))
+        self.btn_record = widgets.Button(description='GHI VIDEO',
+                                         layout=widgets.Layout(width='150px'))
         self.btn_reset = widgets.Button(description='Xoa thong ke')
         self.btn_save = widgets.Button(description='LUU CONFIG',
                                        button_style='success')
@@ -477,6 +500,7 @@ class LaneTuningUI(object):
         self.btn_run.on_click(self._on_run)
         self.btn_halt.on_click(self._on_disarm)
         self.btn_stop.on_click(self._on_emergency)
+        self.btn_record.on_click(self._on_record)
         self.btn_reset.on_click(lambda _b: self.engine.stats.reset())
         self.btn_save.on_click(self._on_save)
         self.btn_close.on_click(lambda _b: self.close())
@@ -595,6 +619,8 @@ class LaneTuningUI(object):
                 self._disarm()
                 break
 
+            self._record_frame(frame, frame_id, result, now)
+
             if self._armed and self._driver is not None:
                 with self._driver_lock:
                     try:
@@ -619,6 +645,10 @@ class LaneTuningUI(object):
 
         # Camera dung vi bat ky ly do gi -> khong duoc de xe chay tiep.
         self._disarm()
+        with self._record_lock:
+            if self._recorder is not None:
+                self._log('Camera dung -> tu dong dong file ghi.')
+                self._stop_record_locked()
         try:
             grabber.stop()
         except Exception:
@@ -657,6 +687,76 @@ class LaneTuningUI(object):
             '<td style="padding-left:18px">lai doi dau</td><td><b>%d</b></td></tr>'
             '</table>' % (banner, s['n'], s['loss_pct'], s['cte_rms'],
                           s['cte_p95'], s['bands_mean'], s['steer_flips']))
+
+    # ------------------------------------------------------------- ghi video
+    # Ghi frame THO (truoc resize/sua mau) co chu dich: con chay lai detector
+    # voi nguong khac tren dung doan duong do, va con hieu chuan lai shading.
+    # Ghi anh da xu ly thi mat goc, khong lam lai duoc.
+    RECORD_FIELDS = ['cte', 'cte_lookahead', 'curvature', 'steer', 'throttle',
+                     'drive_mode', 'n_bands', 'lane_found', 'armed']
+
+    def _on_record(self, _b=None):
+        with self._record_lock:
+            if self._recorder is not None:
+                self._stop_record_locked()
+                return
+            if self._grabber is None:
+                self._log('Mo camera truoc khi ghi.')
+                return
+            try:
+                if not os.path.isdir(self.record_dir):
+                    os.makedirs(self.record_dir)
+                path = os.path.join(
+                    self.record_dir,
+                    'tune_%s.avi' % time.strftime('%Y%m%d_%H%M%S'))
+                self._recorder = FrameRecorder(
+                    path, fps=self.record_fps,
+                    extra_fields=list(self.RECORD_FIELDS))
+            except Exception as exc:
+                self._recorder = None
+                self._log('Khong mo duoc file ghi: %s' % exc)
+                return
+        self.btn_record.description = 'DUNG GHI'
+        self.btn_record.button_style = 'danger'
+        self._log('BAT DAU GHI: %s (+ .sidecar.csv co cte/lai/ga tung frame)'
+                  % path)
+
+    def _stop_record_locked(self):
+        recorder = self._recorder
+        self._recorder = None
+        if recorder is None:
+            return
+        try:
+            recorder.close()
+        except Exception as exc:
+            self._log('Loi dong file ghi: %s' % exc)
+        self.btn_record.description = 'GHI VIDEO'
+        self.btn_record.button_style = ''
+        if recorder.error is not None:
+            self._log('LOI GHI VIDEO: %s' % recorder.error)
+        self._log('DUNG GHI: %d frame (vut %d) -> %s'
+                  % (recorder.n_written, recorder.n_dropped, recorder.path))
+
+    def _record_frame(self, frame, frame_id, result, now):
+        """Day frame vao queue ghi. Khong bao gio block vong camera."""
+        recorder = self._recorder
+        if recorder is None:
+            return
+        res = result['lane']
+        recorder.submit(frame, frame_id, timestamp=now, extra={
+            'cte': '%.4f' % res.cte,
+            'cte_lookahead': '%.4f' % res.cte_lookahead,
+            'curvature': '%.4f' % res.curvature,
+            'steer': '%.4f' % result['steer'],
+            'throttle': '%.4f' % result['throttle'],
+            'drive_mode': result.get('mode', ''),
+            'n_bands': '%d' % res.n_bands,
+            'lane_found': '1' if res.found else '0',
+            'armed': '1' if self._armed else '0',
+        })
+        if recorder.error is not None:
+            with self._record_lock:
+                self._stop_record_locked()
 
     # ----------------------------------------------------------------- buttons
     def _on_open(self, _b=None):
@@ -777,7 +877,8 @@ class LaneTuningUI(object):
             'ga ngay. Camera dung hoac loi xu ly -> tu dong DISARM.' % mode)
         buttons = w.HBox([self.btn_open, self.btn_run, self.btn_halt,
                           self.btn_stop])
-        tools = w.HBox([self.btn_reset, self.btn_save, self.btn_close])
+        tools = w.HBox([self.btn_record, self.btn_reset, self.btn_save,
+                        self.btn_close])
         tabs = w.Tab(children=[self.lane_box, self.control_box])
         tabs.set_title(0, 'Bam vach')
         tabs.set_title(1, 'Dieu khien')
@@ -794,6 +895,9 @@ class LaneTuningUI(object):
     def close(self):
         self._stop_event.set()
         self._disarm()
+        with self._record_lock:
+            if self._recorder is not None:
+                self._stop_record_locked()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         if self._grabber is not None:

@@ -28,6 +28,8 @@ from jetracer_baseline.camera import (                          # noqa: E402
     CSISource, LatestFrameGrabber, SyntheticSource,
     gstreamer_pipeline)
 from jetracer_baseline.config import load_config                 # noqa: E402
+from jetracer_baseline.control.corner import (                   # noqa: E402
+    CORNER, STRAIGHT, CornerController)
 from jetracer_baseline.control.pid import PID                    # noqa: E402
 from jetracer_baseline.control import driver as driver_mod       # noqa: E402
 from jetracer_baseline.perception.lane import LaneDetector       # noqa: E402
@@ -74,7 +76,14 @@ def test_config_loads():
     assert cfg.get('fsm.turn_steer') <= cfg.get('control.steer_max')
     # Doc override phai ghi de dung, khong lam mat khoa khac
     cfg2 = load_config(CONFIG, [os.path.join(ROOT, 'configs', 'fast.yaml')])
-    assert cfg2.get('control.v_max') > cfg.get('control.v_max')
+    # Profile nhanh phai nhanh hon o DOAN THANG. Khong kiem v_max: v_max chi la
+    # tran an toan, khong phai ga muc tieu (xem control/corner.py).
+    assert cfg2.get('control.v_straight') > cfg.get('control.v_straight')
+    assert cfg2.get('control.v_max') >= cfg2.get('control.v_straight')
+    # Va KHONG duoc nhanh hon trong cua: cua sa ban rat hep.
+    assert cfg2.get('control.v_corner') <= cfg2.get('control.v_straight')
+    # Vao cua nhanh hon thi phai nhan ra cua som hon
+    assert cfg2.get('control.curve_enter') <= cfg.get('control.curve_enter')
     assert cfg2.get('lane.roi_top') == cfg.get('lane.roi_top')
 
 
@@ -882,19 +891,29 @@ def test_tuning_engine_runs_without_ipywidgets():
 
 
 def test_tuning_engine_applies_slider_changes_live():
-    """Doi tham so phai co tac dung ngay, khong can tao lai engine."""
+    """Doi tham so phai co tac dung ngay, khong can tao lai engine.
+
+    `dt` lon co chu dich: ga bi gioi han toc do doi (control/corner.py), nen do
+    ga ngay sau mot tick nho se do gioi han do chu khong do gia tri slider.
+    """
     engine = LaneTuningEngine(CONFIG)
-    engine.set_param('control.v_max', 0.40)
-    engine.set_param('control.curve_slowdown', 0.0)
+    engine.set_param('lane.line_color', 'white')
     engine.set_param('control.slowdown', 0.0)
+    engine.set_param('control.curve_enter', 5.0)   # ep luon o che do THANG
+    engine.set_param('control.curve_exit', 4.0)
+    engine.set_param('control.v_max', 0.60)
+    engine.set_param('control.v_straight', 0.40)
     src = SyntheticSource(n_frames=5)
     ok, frame = src.read()
     assert ok
-    assert abs(engine.process(frame, 0.05)['throttle'] - 0.40) < 1e-6
+    for _ in range(5):
+        result = engine.process(frame, 1.0)
+    assert abs(result['throttle'] - 0.40) < 1e-6, result['throttle']
 
-    engine.set_param('control.v_max', 0.10)
-    engine.set_param('control.v_min', 0.05)
-    assert abs(engine.process(frame, 0.05)['throttle'] - 0.10) < 1e-6
+    engine.set_param('control.v_straight', 0.15)
+    for _ in range(5):
+        result = engine.process(frame, 1.0)
+    assert abs(result['throttle'] - 0.15) < 1e-6, result['throttle']
 
 
 def test_tuning_engine_saves_only_changed_keys(tmpdir=None):
@@ -958,19 +977,23 @@ def test_tuning_engine_soft_start_ramps_throttle():
     """
     engine = LaneTuningEngine(CONFIG)
     engine.set_param('lane.line_color', 'white')
+    # Tat gioi han toc do doi ga de test nay chi do RIENG soft-start.
+    engine.set_param('control.throttle_rise_rate', 1000.0)
+    engine.set_param('control.throttle_fall_rate', 1000.0)
     engine.soft_start_s = 1.0
     src = SyntheticSource(n_frames=5)
     ok, frame = src.read()
     assert ok
 
     # Chua chay -> preview hien ga day du, khong ramp
-    full = engine.process(frame, 0.05)['throttle']
+    for _ in range(3):
+        full = engine.process(frame, 1.0)['throttle']
     assert full > 0.0
 
     t0 = 1000.0
     engine.start_run(now=t0)
     assert engine.running
-    values = [engine.process(frame, 0.05, now=t0 + e)['throttle']
+    values = [engine.process(frame, 1.0, now=t0 + e)['throttle']
               for e in (0.0, 0.25, 0.5, 1.0, 2.0)]
     assert values[0] == 0.0, 'ga phai bat dau tu 0'
     for i in range(1, 4):
@@ -980,19 +1003,127 @@ def test_tuning_engine_soft_start_ramps_throttle():
 
     engine.stop_run()
     assert not engine.running
-    assert abs(engine.process(frame, 0.05)['throttle'] - full) < 1e-6
+    assert abs(engine.process(frame, 1.0)['throttle'] - full) < 1e-6
 
 
 def test_tuning_engine_soft_start_disabled_is_immediate():
     engine = LaneTuningEngine(CONFIG)
     engine.set_param('lane.line_color', 'white')
+    engine.set_param('control.throttle_rise_rate', 1000.0)
     engine.soft_start_s = 0.0
     src = SyntheticSource(n_frames=3)
     ok, frame = src.read()
     assert ok
-    full = engine.process(frame, 0.05)['throttle']
+    for _ in range(3):
+        full = engine.process(frame, 1.0)['throttle']
     engine.start_run(now=500.0)
-    assert abs(engine.process(frame, 0.05, now=500.0)['throttle'] - full) < 1e-6
+    assert abs(engine.process(frame, 1.0, now=500.0)['throttle'] - full) < 1e-6
+
+
+def _corner_cfg(**over):
+    cfg = _cfg(control__v_straight=0.30, control__v_corner=0.12,
+               control__curve_enter=0.25, control__curve_exit=0.15,
+               control__v_min=0.05, control__v_max=0.35,
+               control__slowdown=0.0, control__throttle_rise_rate=1000.0,
+               control__throttle_fall_rate=1000.0)
+    for key, value in over.items():
+        cfg.set(key.replace('__', '.'), value)
+    return cfg
+
+
+def test_corner_controller_picks_two_speed_levels():
+    """Doan thang di nhanh, khuc cua bo ga - day la muc dich cua module nay."""
+    ctrl = CornerController(_corner_cfg())
+
+    # Duong thang -> ga doan thang. dt lon de bo qua gioi han toc do doi ga.
+    for _ in range(5):
+        _steer, throttle, mode = ctrl.step(0.0, 0.0, 0.0, 1.0)
+    assert mode == STRAIGHT
+    assert abs(throttle - 0.30) < 1e-6, throttle
+
+    # Cua gat -> ga cua
+    for _ in range(5):
+        _steer, throttle, mode = ctrl.step(0.0, 0.0, 0.6, 1.0)
+    assert mode == CORNER
+    assert abs(throttle - 0.12) < 1e-6, throttle
+
+
+def test_corner_controller_hysteresis_prevents_flapping():
+    """Mot nguong duy nhat se lam ga bat/tat lien tuc khi do cong dao quanh no."""
+    ctrl = CornerController(_corner_cfg())
+    assert ctrl.update_mode(0.30) == CORNER
+    # Nam GIUA hai nguong -> phai GIU nguyen CUA, khong duoc nhay ve THANG
+    assert ctrl.update_mode(0.20) == CORNER
+    assert ctrl.update_mode(0.16) == CORNER
+    assert ctrl.update_mode(0.10) == STRAIGHT
+    # Va nguoc lai: giua hai nguong thi giu THANG
+    assert ctrl.update_mode(0.20) == STRAIGHT
+    assert ctrl.update_mode(0.26) == CORNER
+
+    # Dem so lan doi che do tren mot chuoi dao quanh nguong
+    ctrl2 = CornerController(_corner_cfg())
+    modes = [ctrl2.update_mode(v) for v in
+             [0.24, 0.26, 0.24, 0.26, 0.24, 0.26] * 5]
+    switches = sum(1 for a, b in zip(modes, modes[1:]) if a != b)
+    assert switches <= 1, 'doi che do %d lan quanh nguong' % switches
+
+
+def test_corner_controller_config_with_bad_hysteresis_is_repaired():
+    """exit >= enter lam mat sach tac dung chong rung -> phai tu sua, khong im lang."""
+    ctrl = CornerController(_corner_cfg(control__curve_exit=0.40))
+    assert ctrl.curve_exit < ctrl.curve_enter
+
+
+def test_corner_controller_feedforward_steers_into_the_bend():
+    """Cua hep can danh lai NGAY khi thay duong cong, khong doi CTE tang."""
+    cfg = _corner_cfg(control__curve_feedforward=0.9,
+                      control__corner_steer_gain=1.6,
+                      control__steer_max=0.60)
+    ctrl = CornerController(cfg)
+
+    # CTE = 0 (xe dang dung tam vach) nhung phia truoc cong sang phai.
+    # PID se ra 0; chi feed-forward moi sinh duoc lenh lai.
+    steer, _t, mode = ctrl.step(0.0, 0.0, 0.5, 0.05)
+    assert mode == CORNER
+    assert steer > 0.3, 'feed-forward khong danh lai vao cua: %.3f' % steer
+
+    ctrl.reset()
+    steer_left, _t, _m = ctrl.step(0.0, 0.0, -0.5, 0.05)
+    assert steer_left < -0.3, 'cua trai phai ra lai am: %.3f' % steer_left
+
+    # Khong duoc vuot hard limit du nhan corner_steer_gain
+    ctrl.reset()
+    steer, _t, _m = ctrl.step(1.0, 1.0, 1.0, 0.05)
+    assert abs(steer) <= 0.60 + 1e-9
+
+
+def test_corner_controller_throttle_rate_limits_are_asymmetric():
+    """Len ga tu tu (banh khong truot), bo ga nhanh (thay cua la buong ngay)."""
+    cfg = _corner_cfg(control__throttle_rise_rate=0.8,
+                      control__throttle_fall_rate=3.0)
+    ctrl = CornerController(cfg)
+
+    _s, t1, _m = ctrl.step(0.0, 0.0, 0.0, 0.1)      # muon 0.30, chi len 0.08
+    assert abs(t1 - 0.08) < 1e-6, t1
+
+    for _ in range(50):
+        _s, t_top, _m = ctrl.step(0.0, 0.0, 0.0, 0.1)
+    assert abs(t_top - 0.30) < 1e-6
+
+    _s, t_down, _m = ctrl.step(0.0, 0.0, 0.9, 0.1)  # muon 0.12, duoc xuong 0.30
+    assert abs(t_down - 0.0) < 1e-6 or t_down < t_top
+    assert (t_top - t_down) > (t1 - 0.0), 'bo ga phai nhanh hon len ga'
+
+
+def test_corner_controller_slows_down_when_lane_is_lost():
+    """Mat vach thi dang lai theo gia tri cu - cang nhanh cang xa vach."""
+    cfg = _corner_cfg()
+    ctrl = CornerController(cfg)
+    for _ in range(5):
+        _s, fast, _m = ctrl.step(0.0, 0.0, 0.0, 1.0)
+    for _ in range(5):
+        _s, slow, _m = ctrl.step(0.0, 0.0, 0.0, 1.0, lane_found=False)
+    assert slow < fast, 'mat vach ma ga khong giam: %.3f vs %.3f' % (slow, fast)
 
 
 def test_rolling_stats_window_and_flip_count():
