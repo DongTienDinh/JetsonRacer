@@ -150,6 +150,18 @@ def _nvidia_init_error(exc, module_path, constructor_kwargs):
         (module_path, requested, detail, extra))
 
 
+def servo_output_for(steering, steering_gain, steering_offset,
+                     output_min, output_max):
+    """Output servo THUC TE cho mot lenh lai, sau gain/offset/hard-limit.
+
+    Dung de bao cho nguoi dung biet lenh lai dang bi cat cut o dau. Khong co
+    ham nay thi giao dien hien `lai=-0.600` trong khi servo chi quay 0.390 va
+    khong co gi noi cho biet - nguoi dung se di tang Kp/gain nham cho.
+    """
+    raw = float(steering) * float(steering_gain) + float(steering_offset)
+    return _clip(raw, float(output_min), float(output_max)), raw
+
+
 class BaseDriver(object):
     def set(self, steering, throttle):
         raise NotImplementedError

@@ -37,6 +37,8 @@ class CornerController(object):
         self.reset_from_config(cfg)
         self.mode = STRAIGHT
         self._throttle = 0.0
+        self.steer_wanted = 0.0
+        self.steer_limit = self.steer_max
 
     def reset_from_config(self, cfg):
         c = cfg.get
@@ -58,6 +60,13 @@ class CornerController(object):
         self.curve_feedforward = float(c('control.curve_feedforward', 0.9))
         self.corner_steer_gain = float(c('control.corner_steer_gain', 1.6))
         self.steer_max = float(c('control.steer_max', 0.60))
+        # Tran lai RIENG cho khuc cua. Cua cua sa ban rat hep nen can be gan het
+        # lai, nhung dung tran do cho ca doan thang thi xe giat va de vuot lane.
+        # Mac dinh bang steer_max -> config cu khong doi hanh vi.
+        self.corner_steer_max = float(
+            c('control.corner_steer_max', self.steer_max))
+        if self.corner_steer_max < self.steer_max:
+            self.corner_steer_max = self.steer_max
 
         # Don vi: lenh ga / giay. Xuong nhanh hon len (xem docstring).
         self.throttle_rise_rate = float(c('control.throttle_rise_rate', 0.8))
@@ -66,6 +75,8 @@ class CornerController(object):
     def reset(self):
         self.mode = STRAIGHT
         self._throttle = 0.0
+        self.steer_wanted = 0.0
+        self.steer_limit = self.steer_max
 
     # ------------------------------------------------------------------ mode
     def update_mode(self, curvature):
@@ -89,9 +100,13 @@ class CornerController(object):
 
         # --- lai: PID + feed-forward theo do cong -------------------------
         steer = pid_output + self.curve_feedforward * float(curvature)
+        limit = self.steer_max
         if mode == CORNER:
             steer *= self.corner_steer_gain
-        steer = max(-self.steer_max, min(self.steer_max, steer))
+            limit = self.corner_steer_max
+        self.steer_wanted = steer          # truoc khi cat, de bao chan tran
+        steer = max(-limit, min(limit, steer))
+        self.steer_limit = limit
 
         # --- ga: chon muc theo che do, roi tru theo do lech ---------------
         target = self.v_corner if mode == CORNER else self.v_straight

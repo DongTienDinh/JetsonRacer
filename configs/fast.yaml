@@ -17,6 +17,9 @@ control:
   curve_exit: 0.12
   curve_feedforward: 1.1   # tốc độ cao cần đánh lái sớm hơn nữa
   corner_steer_gain: 1.7
+  # Bẻ hết lái trong cua. CHỈ có tác dụng sau khi đã nới
+  # driver.steering_output_min/max — xem chuỗi giới hạn trong default.yaml.
+  corner_steer_max: 1.0
   throttle_fall_rate: 4.0  # bỏ ga dứt khoát hơn khi thấy cua
   slowdown: 0.18           # phanh mạnh hơn ở cua vì vào cua nhanh hơn
   pid:

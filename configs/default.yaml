@@ -124,6 +124,21 @@ control:
     kd: 0.10
     out_limit: 1.0
   steer_max: 0.60
+  # Trần lái RIÊNG cho khúc cua — cua sa bàn rất hẹp, cần bẻ gần hết lái.
+  # Dùng trần này cho cả đoạn thẳng thì xe giật và dễ vượt lane.
+  corner_steer_max: 0.60
+  #
+  # !! GÓC CUA RỘNG QUÁ THÌ ĐỌC ĐÂY — ba giới hạn NHÂN DỒN nhau: !!
+  #   steer_max 0.60  ×  driver.steering_gain 0.65  =  0.390
+  #   rồi còn bị chặn bởi driver.steering_output_max 0.40
+  #   => servo chỉ dùng 39% tầm quay (xung 1207–1793 µs / dải 750–2250 µs)
+  # Bánh KHÔNG THỂ bẻ gắt hơn cho tới khi nới `driver.steering_output_max`.
+  # Nới bao nhiêu phải ĐO, không đoán — servo đâm vào chặn cơ khí sẽ stall/cháy:
+  #   python3 tools/check_hardware.py --driver nvidia --calibrate-steering \
+  #       --wheels-are-lifted
+  # Đo xong đặt `driver.steering_output_min/max` = giá trị an toàn cuối cùng,
+  # rồi nâng `corner_steer_max` (và `steer_max` nếu muốn) cho tới khi
+  # steer_max × |steering_gain| >= steering_output_max.
   # Đánh lái sớm khi vào cua: error = (1-w)*cte + w*cte_lookahead.
   # w = 0 -> chỉ sửa khi đã lệch (hay bị cắt cua muộn). w cao -> vào cua sớm hơn.
   steer_lookahead_weight: 0.5

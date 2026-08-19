@@ -34,6 +34,7 @@ from .camera import (LatestFrameGrabber, build_source,
                      format_camera_environment, shading_applied_at_source)
 from .config import load_config
 from .control.corner import CornerController
+from .control.driver import servo_output_for
 from .control.driver import build_driver
 from .control.pid import PID
 from .perception.lane import LaneDetector
@@ -66,7 +67,8 @@ CONTROL_PARAMS = [
     ('control.curve_exit', 'Nguong RA cua', 0.02, 0.70, 0.01),
     ('control.curve_feedforward', 'Lai theo do cong', 0.0, 2.5, 0.05),
     ('control.corner_steer_gain', 'Boi lai khi cua', 1.0, 3.0, 0.05),
-    ('control.steer_max', 'Lai toi da', 0.10, 1.00, 0.05),
+    ('control.steer_max', 'Lai toi da (thang)', 0.10, 1.00, 0.05),
+    ('control.corner_steer_max', 'Lai toi da (CUA)', 0.10, 1.00, 0.05),
     ('control.pid.kp', 'PID Kp', 0.0, 2.0, 0.05),
     ('control.pid.kd', 'PID Kd', 0.0, 1.0, 0.01),
     ('control.steer_lookahead_weight', 'Trong so diem ngam', 0.0, 1.0, 0.05),
@@ -257,6 +259,15 @@ class LaneTuningEngine(object):
         self.curve_slowdown = float(cfg.get('control.curve_slowdown', 0.35))
         self.steer_look_w = float(cfg.get('control.steer_lookahead_weight', 0.5))
         self.steer_max = float(cfg.get('control.steer_max', 0.60))
+        # Tham so cua driver, chi de HIEN THI output servo that - vong tune
+        # khong tu doi hard-limit cua driver (phai hieu chuan bang
+        # tools/check_hardware.py --calibrate-steering, xe ke banh).
+        self.drv_gain = float(cfg.get('control.driver.steering_gain', -0.65))
+        self.drv_offset = float(cfg.get('control.driver.steering_offset', 0.0))
+        self.drv_out_min = float(
+            cfg.get('control.driver.steering_output_min', -1.0))
+        self.drv_out_max = float(
+            cfg.get('control.driver.steering_output_max', 1.0))
         self._dirty = False
 
     # --------------------------------------------------------------- run state
@@ -301,10 +312,23 @@ class LaneTuningEngine(object):
         ramp = self.soft_start_scale(now)
         throttle *= ramp
 
+        servo, servo_raw = servo_output_for(
+            steer, self.drv_gain, self.drv_offset,
+            self.drv_out_min, self.drv_out_max)
+        # Hai cho co the cat lenh lai, phai phan biet duoc:
+        #   - `steer_clipped`: bi tran phan mem (steer_max / corner_steer_max)
+        #   - `servo_clipped`: bi hard-limit cua driver (steering_output_max)
+        # Chi bao "lai toi da" chung chung thi nguoi dung se chinh nham num.
+        steer_clipped = abs(self.corner.steer_wanted) > self.corner.steer_limit + 1e-6
+        servo_clipped = abs(servo_raw - servo) > 1e-6
+
         self.stats.push(res.cte, steer, res.found, res.n_bands)
         return {
             'proc': proc, 'lane': res, 'steer': steer, 'throttle': throttle,
             'error': err, 'ramp': ramp, 'mode': mode, 'pid': pid_out,
+            'servo': servo, 'servo_span': self.drv_out_max,
+            'steer_clipped': steer_clipped, 'servo_clipped': servo_clipped,
+            'steer_wanted': self.corner.steer_wanted,
         }
 
     # ------------------------------------------------------------------ render
@@ -433,58 +457,67 @@ def _draw_banner(panel, res, result, fps, armed, driver_kind='dryrun',
                  ui_mode=None):
     """Bang trang thai tren cung panel.
 
-    Khoi so lieu duoc CANH PHAI theo be rong do duoc, khong dat o mot ty le co
-    dinh: chuoi trang thai dai ngan khac nhau tuy driver, dat cung cho thi hai
-    khoi chu de len nhau va khong doc duoc con so nao.
+    Hai khoi chu duoc do be rong THAT roi moi dat cho: khoi trai canh trai,
+    khoi phai canh phai. Dat o ty le co dinh thi chuoi dai ngan khac nhau tuy
+    che do se de len nhau va khong doc duoc con so nao.
     """
     width = panel.shape[1]
+    font = cv2.FONT_HERSHEY_SIMPLEX
     banner = np.zeros((58, width, 3), np.uint8)
     banner[:] = (18, 18, 18)
-    font = cv2.FONT_HERSHEY_SIMPLEX
 
     live = (str(driver_kind) != 'dryrun')
     ramp = float(result.get('ramp', 1.0))
     if armed and ui_mode == MODE_MANUAL:
-        # Phai phan biet ro: o che do nay CV van chay va van hien so lieu,
-        # nhung nguoi moi la nguoi dieu khien xe.
-        state = ('LAI TAY - ban dieu khien (CV chi do)' if live
+        # O che do nay CV van chay va van hien so lieu, nhung NGUOI moi la
+        # nguoi dieu khien xe - phai phan biet ro.
+        state = ('LAI TAY - ban dieu khien' if live
                  else 'LAI TAY (DRYRUN - banh khong quay)')
         colour = (255, 160, 60)
     elif not armed:
         state, colour = 'DANG DUNG (bam CHAY hoac LAI TAY)', (160, 160, 160)
     elif not live:
-        # Vang = dryrun khong gui gi xuong phan cung, banh dung yen. Bao "xe dang
-        # chay" o day la noi doi va nguoi dung se ngoi doi xe chay.
         state, colour = 'DRYRUN - BANH KHONG QUAY', (0, 200, 255)
     elif ramp < 1.0:
         state, colour = 'DANG CHAY - tang ga %d%%' % int(ramp * 100), (0, 200, 255)
     else:
         state, colour = 'DANG CHAY - BAM LINE', (60, 60, 255)
 
-    cv2.putText(banner, state, (8, 20), font, 0.5, colour, 2)
+    mode = result.get('mode') or ''
     found = 'CO' if res.found else 'MAT VACH'
-    cv2.putText(banner, 'vach=%s  dai=%d  FPS(UI)=%.1f  driver=%s'
-                % (found, res.n_bands, fps, driver_kind),
-                (8, 44), font, 0.42,
-                (120, 240, 120) if res.found else (60, 60, 255), 1)
-
-    # Che do lai o giua: nhin mot cai la biet vi sao ga dang cao hay thap.
-    mode = result.get('mode')
-    if mode:
-        corner = (mode != 'THANG')
-        cv2.putText(banner, mode, (int(width * 0.40), 44), font, 0.55,
-                    (0, 165, 255) if corner else (120, 240, 120), 2)
-
-    right = [
-        'cte=%+.3f  ngam=%+.3f  cong=%+.3f' % (
-            res.cte, res.cte_lookahead, res.curvature),
-        'lai=%+.3f  ga=%.3f' % (result['steer'], result['throttle']),
+    left = [
+        (state, 0.5, colour, 2),
+        ('vach=%s  dai=%d  FPS(UI)=%.1f  %s' % (found, res.n_bands, fps, mode),
+         0.42, (120, 240, 120) if res.found else (60, 60, 255), 1),
     ]
-    widest = max(cv2.getTextSize(t, font, 0.42, 1)[0][0] for t in right)
-    x = max(8, width - widest - 10)
-    for i, text in enumerate(right):
-        cv2.putText(banner, text, (x, 20 + i * 24), font, 0.42,
-                    (240, 240, 240), 1)
+
+    servo = result.get('servo')
+    if servo is None:
+        steer_line = 'lai=%+.3f  ga=%.3f' % (result['steer'], result['throttle'])
+        steer_colour = (240, 240, 240)
+    else:
+        if result.get('servo_clipped'):
+            tag, steer_colour = ' HARD-LIMIT', (60, 60, 255)
+        elif result.get('steer_clipped'):
+            tag, steer_colour = ' TRAN LAI', (0, 200, 255)
+        else:
+            tag, steer_colour = '', (240, 240, 240)
+        steer_line = 'lai%+.2f servo%+.2f%s ga%.2f' % (
+            result['steer'], servo, tag, result['throttle'])
+    right = [
+        ('cte%+.2f ngam%+.2f cong%+.2f' % (
+            res.cte, res.cte_lookahead, res.curvature), 0.42, (240, 240, 240)),
+        (steer_line, 0.42, steer_colour),
+    ]
+
+    left_w = max(cv2.getTextSize(t, font, sc, th)[0][0] for t, sc, _c, th in left)
+    right_w = max(cv2.getTextSize(t, font, sc, 1)[0][0] for t, sc, _c in right)
+    x_right = max(left_w + 16, width - right_w - 8)
+
+    for i, (text, scale, col, thick) in enumerate(left):
+        cv2.putText(banner, text, (8, 20 + i * 24), font, scale, col, thick)
+    for i, (text, scale, col) in enumerate(right):
+        cv2.putText(banner, text, (x_right, 20 + i * 24), font, scale, col, 1)
     return np.vstack([banner, panel])
 
 
@@ -820,6 +853,16 @@ class LaneTuningUI(object):
         if s is None:
             return '<i>chua co so lieu</i>'
         warn = []
+        span = abs(self.engine.drv_out_max)
+        reach = min(abs(self.engine.corner.corner_steer_max
+                        * self.engine.drv_gain), span)
+        if reach < 0.95 * 1.0:
+            warn.append(
+                'servo chi dung %.0f%% tam quay (lai %.2f x gain %.2f, '
+                'hard-limit %.2f) -> ban kinh cua bi rong. Hieu chuan bang '
+                'tools/check_hardware.py --calibrate-steering'
+                % (100 * reach, self.engine.corner.corner_steer_max,
+                   abs(self.engine.drv_gain), span))
         if s['loss_pct'] > 2.0:
             warn.append('mat vach %.1f%% (muc tieu <= 2%%)' % s['loss_pct'])
         if s['bands_mean'] < 3.0:
