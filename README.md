@@ -70,6 +70,23 @@ python3 tools/check_hardware.py --driver nvidia --actuator \
 Preflight sẽ từ chối test actuator nếu Jetson không ở power mode 5W. Thiết lập
 bằng `sudo nvpmodel -m 1`, rồi xác nhận lại với `nvpmodel -q`.
 
+Tune bám vạch **trực tiếp trên JupyterLab** — xem camera xe đang chạy, kéo slider,
+thấy ngay kết quả, không cần SSH gõ lệnh trên Jetson:
+
+```bash
+jupyter lab --ip=0.0.0.0 --no-browser
+```
+
+Mở [tune_lane.ipynb](tune_lane.ipynb) từ máy khác và Run All. Mặc định `driver_kind='dryrun'`
+— bánh không quay. Chỉnh xong bấm **LƯU CONFIG** → ghi `configs/tuned.yaml`, rồi chạy thật:
+
+```bash
+python3 -m src.jetracer_baseline.cli run --task speed --driver nvidia --override configs/tuned.yaml --record
+```
+
+FPS hiển thị trong giao diện là `FPS(UI)`, **không** phải FPS thi đấu — vòng đó còn vẽ
+panel và mã hoá JPEG. Con số đối chiếu ngưỡng 20 chỉ lấy từ một lượt chạy qua CLI.
+
 Hiệu chuẩn lens shading màu (**làm trước khi tune bất kỳ ngưỡng màu nào**) —
 camera CSI của xe đỏ gấp ~1.6 lần ở góc ảnh so với tâm ảnh, nên một ngưỡng HSV
 duy nhất không dùng được cho cả khung hình nếu chưa sửa:

@@ -90,11 +90,30 @@ class LaneDetector(object):
         self.line_color = str(cfg.get('lane.line_color', 'red'))
 
         preset = COLOR_PRESETS.get(self.line_color, COLOR_PRESETS['red'])
+
+        # `hsv_s_min` / `hsv_v_min` la hai num CHINH THEO MAU-DOC-LAP: chung chi
+        # nang san S/V cua preset dang dung. Giao dien tune chi ghi hai so nay,
+        # KHONG ghi ca dai HSV. Ly do: neu ghi thang `hsv_low_1` cho vach do roi
+        # sau nay doi `line_color: white`, dai mau do cu se de len preset trang
+        # ma khong bao gi - loi im lang, rat kho tim.
+        s_min = cfg.get('lane.hsv_s_min')
+        v_min = cfg.get('lane.hsv_v_min')
+
+        def _floor(low):
+            if low is None:
+                return None
+            low = list(low)
+            if s_min is not None:
+                low[1] = int(s_min)
+            if v_min is not None:
+                low[2] = int(v_min)
+            return low
+
         self.hsv_low_1 = np.array(
-            cfg.get('lane.hsv_low_1', preset['hsv_low_1']), np.uint8)
+            _floor(cfg.get('lane.hsv_low_1', preset['hsv_low_1'])), np.uint8)
         self.hsv_high_1 = np.array(
             cfg.get('lane.hsv_high_1', preset['hsv_high_1']), np.uint8)
-        low2 = cfg.get('lane.hsv_low_2', preset['hsv_low_2'])
+        low2 = _floor(cfg.get('lane.hsv_low_2', preset['hsv_low_2']))
         high2 = cfg.get('lane.hsv_high_2', preset['hsv_high_2'])
         self.hsv_low_2 = None if low2 is None else np.array(low2, np.uint8)
         self.hsv_high_2 = None if high2 is None else np.array(high2, np.uint8)

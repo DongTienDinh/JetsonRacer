@@ -35,6 +35,8 @@ from jetracer_baseline.perception.shading import (               # noqa: E402
     ShadingCorrector, fit_coefficients, measure_ratio_profile)
 from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
+from jetracer_baseline.tuning_ui import (                        # noqa: E402
+    LaneTuningEngine, RollingStats, _dict_diff)
 from jetracer_baseline.manual_collection import (                # noqa: E402
     DatasetSessionWriter, ManualDriveCollector, apply_deadzone,
     shape_steering, shape_throttle, slew_towards)
@@ -851,6 +853,121 @@ def test_shading_preserves_brightness_and_does_not_clip():
     assert abs(mean_after - mean_before) / mean_before < 0.15, (
         'do sang trung binh doi tu %.1f sang %.1f' % (mean_before, mean_after))
     assert float(np.mean(out >= 255)) < 0.01, 'qua nhieu pixel bi chay'
+
+
+def test_tuning_engine_runs_without_ipywidgets():
+    """Phan xu ly cua giao dien tune phai chay duoc ngoai Jupyter.
+
+    Neu logic bi tron vao lop widget thi khong test duoc gi - ma logic moi la
+    phan de sai. Test nay chinh la ly do LaneTuningEngine tach khoi LaneTuningUI.
+    """
+    engine = LaneTuningEngine(CONFIG)
+    src = SyntheticSource(n_frames=30)
+    engine.set_param('lane.line_color', 'white')
+
+    for _ in range(30):
+        ok, frame = src.read()
+        assert ok
+        result = engine.process(frame, 1.0 / 30.0)
+        assert set(['proc', 'lane', 'steer', 'throttle']) <= set(result.keys())
+        assert -1.0 <= result['steer'] <= 1.0
+        assert 0.0 <= result['throttle'] <= engine.v_max + 1e-9
+
+    summary = engine.stats.summary()
+    assert summary is not None and summary['n'] == 30
+
+    panel = engine.render_panel(result, fps=20.0, armed=False, width=640)
+    assert panel.shape[1] == 640 and panel.ndim == 3
+    assert engine.encode_jpeg(panel)
+
+
+def test_tuning_engine_applies_slider_changes_live():
+    """Doi tham so phai co tac dung ngay, khong can tao lai engine."""
+    engine = LaneTuningEngine(CONFIG)
+    engine.set_param('control.v_max', 0.40)
+    engine.set_param('control.curve_slowdown', 0.0)
+    engine.set_param('control.slowdown', 0.0)
+    src = SyntheticSource(n_frames=5)
+    ok, frame = src.read()
+    assert ok
+    assert abs(engine.process(frame, 0.05)['throttle'] - 0.40) < 1e-6
+
+    engine.set_param('control.v_max', 0.10)
+    engine.set_param('control.v_min', 0.05)
+    assert abs(engine.process(frame, 0.05)['throttle'] - 0.10) < 1e-6
+
+
+def test_tuning_engine_saves_only_changed_keys(tmpdir=None):
+    """LUU CONFIG phai ghi file override nho, khong de len default.yaml.
+
+    Ghi de default.yaml se mat toan bo comment giai thich vi sao tung con so
+    duoc chon - phan dat gia nhat cua file do.
+    """
+    workdir = tmpdir or tempfile.mkdtemp(prefix='tune_save_')
+    try:
+        engine = LaneTuningEngine(CONFIG)
+        out = os.path.join(workdir, 'tuned.yaml')
+
+        assert engine.save_overrides(out) is None, 'chua doi gi ma da ghi file'
+        assert not os.path.exists(out)
+
+        engine.set_param('control.pid.kp', 0.42)
+        engine.set_param('lane.hsv_s_min', 111)
+        diff = engine.save_overrides(out)
+
+        assert diff == {'control': {'pid': {'kp': 0.42}},
+                        'lane': {'hsv_s_min': 111}}, diff
+        # File phai nap lai duoc va thuc su de len config goc
+        cfg = load_config(CONFIG, [out])
+        assert abs(float(cfg.get('control.pid.kp')) - 0.42) < 1e-9
+        assert int(cfg.get('lane.hsv_s_min')) == 111
+        assert cfg.get('control.v_max') == load_config(CONFIG).get('control.v_max')
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_tuning_saved_thresholds_survive_colour_switch():
+    """Nguong S/V da luu KHONG duoc de len preset khi doi mau vach.
+
+    Neu UI ghi thang dai HSV cua mau do, sau nay doi sang `white` thi dai do cu
+    van con hieu luc va detector khong bat duoc gi - loi im lang rat kho tim.
+    """
+    engine = LaneTuningEngine(CONFIG)
+    engine.set_param('lane.hsv_s_min', 40)
+
+    engine.set_param('lane.line_color', 'red')
+    engine.rebuild()
+    red_low = list(engine.lane.hsv_low_1)
+
+    engine.set_param('lane.line_color', 'white')
+    engine.rebuild()
+    white_low = list(engine.lane.hsv_low_1)
+
+    assert int(red_low[1]) == 40 and int(white_low[1]) == 40, 'S floor phai duoc ap'
+    # Hue/V cua hai preset khac han nhau -> phai doi theo mau, khong bi dong bang
+    assert int(red_low[2]) != int(white_low[2]), (
+        'doi mau vach nhung dai HSV khong doi: %s vs %s' % (red_low, white_low))
+    assert engine.lane.hsv_low_2 is None, 'preset trang khong co dai hue thu hai'
+
+
+def test_rolling_stats_window_and_flip_count():
+    stats = RollingStats(window=5)
+    for value in (0.1, -0.1, 0.1, -0.1, 0.1, -0.1, 0.1):
+        stats.push(value, value, True, 4)
+    assert stats.n == 5, 'cua so truot phai gioi han so mau'
+    summary = stats.summary()
+    assert summary['steer_flips'] == 4
+    assert summary['loss_pct'] == 0.0
+
+    stats.reset()
+    assert stats.summary() is None
+
+
+def test_dict_diff_ignores_unchanged_nested_keys():
+    base = {'a': {'b': 1, 'c': 2}, 'd': 3}
+    assert _dict_diff(base, {'a': {'b': 1, 'c': 2}, 'd': 3}) == {}
+    assert _dict_diff(base, {'a': {'b': 9, 'c': 2}, 'd': 3}) == {'a': {'b': 9}}
+    assert _dict_diff(base, {'a': {'b': 1, 'c': 2}, 'd': 3, 'e': 5}) == {'e': 5}
 
 
 def test_sign_tracker_needs_votes():
