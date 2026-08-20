@@ -25,8 +25,13 @@ Co y KHONG doc `lane.warp_src` tu config: khoa do dung de tune duong CV. Ai do
 chinh no cho CV se lam lech am tham hinh hoc cua CNN. Muon doi rieng cho CNN thi
 dung khoa `lane.cnn.*`.
 
-Python 3.6 (JetPack 4.6). Can: tensorrt, pycuda.
-    sudo pip3 install pycuda
+Python 3.6 (JetPack 4.5.1, TensorRT 7.1.3 - DA XAC NHAN TREN XE).
+Can: tensorrt (co san theo JetPack), pycuda (cai them).
+Cai pycuda PHAI xuat bien CUDA truoc, khong thi loi 'cuda.h: No such file':
+    export PATH=/usr/local/cuda/bin:$PATH
+    export CPATH=/usr/local/cuda/include:$CPATH
+    export LIBRARY_PATH=/usr/local/cuda/lib64:$LIBRARY_PATH
+    pip3 install --user --no-cache-dir pycuda      # KHONG dung sudo
 """
 
 from __future__ import print_function
@@ -65,9 +70,9 @@ def _build_warp(w, h, src_pts, margin):
 class TensorRTEngine(object):
     """Boc engine TensorRT. Ho tro ca API binding (TRT 8.0) va tensor (TRT >=8.5).
 
-    Vi sao ho tro ca hai: xe thi chay JetPack 4.6 / TRT 8.0.1 dung API binding,
-    nhung may dev hoac ban JetPack khac co the la 8.5+ noi API do da bo. Doan
-    if/else nay re hon nhieu so voi mot buoi debug vi doi image.
+    Vi sao ho tro ca hai: xe chay TRT 7.1.3 dung API binding, nhung may dev hoac
+    ban JetPack khac co the la 8.5+ noi API do da bo. Doan if/else nay re hon
+    nhieu so voi mot buoi debug vi doi image.
     """
 
     def __init__(self, engine_path):
@@ -78,9 +83,16 @@ class TensorRTEngine(object):
         except ImportError as exc:
             raise ImportError(
                 '%s.\n'
-                'lane.mode=cnn CHI chay duoc tren Jetson. JetPack 4.6 co san\n'
-                'tensorrt; pycuda thi cai them:  sudo pip3 install pycuda\n'
-                'Tren laptop, dat lane.cnn.engine rong de dung rieng hau xu ly.'
+                'lane.mode=cnn CHI chay duoc tren Jetson. tensorrt co san theo\n'
+                'JetPack; pycuda phai cai them va PHAI xuat bien CUDA truoc,\n'
+                'neu khong se loi "cuda.h: No such file or directory":\n'
+                '  export PATH=/usr/local/cuda/bin:$PATH\n'
+                '  export CPATH=/usr/local/cuda/include:$CPATH\n'
+                '  export LIBRARY_PATH=/usr/local/cuda/lib64:$LIBRARY_PATH\n'
+                '  pip3 install --user --no-cache-dir pycuda   (KHONG dung sudo:\n'
+                '  sudo xoa sach cac bien vua xuat)\n'
+                'Tren laptop: dat lane.cnn.backend=onnx de chay bang ONNXRuntime,\n'
+                'hoac lane.cnn.engine rong de chi dung hau xu ly.'
                 % exc)
         self._cuda = cuda
 

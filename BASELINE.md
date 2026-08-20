@@ -88,7 +88,7 @@ Tổng 25 phút: Speed Track ≤ 15 phút cho **3 lượt × 5 phút**, Smart Ci
 | Dataset BTC | **Không giống sa bàn thật** | ĐB §7 | Bắt buộc tự thu dữ liệu + augment mạnh |
 | Xe dùng chung | 5 xe / 10 đội | Thể lệ §1.2 | **Offline-first**: phần lớn dev phải chạy được không cần xe |
 
-**Lưu ý môi trường:** Jetson Nano trong JetRacer ROS AI Kit chạy JetPack 4.6 / Ubuntu 18.04 / **Python 3.6**. Toàn bộ code baseline trong repo này viết tương thích Python 3.6 (không dùng `dataclasses`, không dùng `X | Y`, không f-string `=`). Đây là bẫy rất hay gặp: code viết trên laptop Python 3.11 sẽ không chạy trên xe.
+**Lưu ý môi trường:** Jetson Nano trong JetRacer ROS AI Kit chạy **JetPack 4.5.1** (đã xác nhận trên xe ngày 2026-08-20: `tensorrt 7.1.3.0`, hostname `nano-4gb-jp451`) / Ubuntu 18.04 / **Python 3.6**. Toàn bộ code baseline trong repo này viết tương thích Python 3.6 (không dùng `dataclasses`, không dùng `X | Y`, không f-string `=`). Đây là bẫy rất hay gặp: code viết trên laptop Python 3.11 sẽ không chạy trên xe.
 
 ---
 

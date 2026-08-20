@@ -39,7 +39,7 @@ wandb/
 *.7z
 data/
 datasets/
-models/
+models/*
 weights/
 checkpoints/
 *.mp4
@@ -53,6 +53,13 @@ checkpoints/
 *.engine
 *.plan
 *.onnx
+
+# NGOAI LE: artifact deploy. File .onnx trong models/ chi 1-2 MB va la thu THAT
+# SU chay tren xe - phai truy nguoc duoc ve dung commit, va de Jetson lay bang
+# `git pull` thay vi scp. Dong phu dinh phai nam SAU `*.onnx` o tren thi moi
+# thang (gitignore lay quy tac khop CUOI CUNG).
+# `.engine` van bi chan: no gan chat thiet bi, chep sang may khac la vo dung.
+!models/*.onnx
 *.tflite
 *.torchscript
 
