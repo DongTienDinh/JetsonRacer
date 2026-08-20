@@ -77,9 +77,19 @@ CNN_LANE_PARAMS = [
 SIMPLE_PARAMS = [
     ('control.v_straight', 'TOC DO doan thang', 0.00, 0.60, 0.01),
     ('control.v_corner', 'TOC DO trong cua', 0.00, 0.40, 0.01),
-    ('control.v_max', 'TRAN ga (an toan)', 0.00, 0.80, 0.01),
+    ('control.curve_enter', 'Nhay vao CUA som/muon', 0.03, 0.60, 0.01),
     ('control.curve_feedforward', 'Danh lai SOM theo cua', 0.0, 2.5, 0.05),
     ('control.corner_steer_gain', 'Boi lai khi cua', 1.0, 3.0, 0.05),
+    ('control.corner_steer_max', 'Tran lai khi cua', 0.10, 1.00, 0.05),
+    # TRAN CUNG cua servo. Ba gioi han NHAN DON nhau:
+    #   steer_max x |steering_gain| roi con bi cat boi tran nay.
+    #   0.60 x 0.65 = 0.390, tran 0.40 -> xe moi dung 39% tam lai.
+    # Keo "Boi lai khi cua" len bao nhieu cung vo ich neu khong noi tran nay.
+    # NHUNG day la gioi han CO KHI: qua muc thi servo ken, keu, co the gay tay
+    # lai. Phai do gioi han that bang tools/check_hardware.py --calibrate-steering
+    # voi xe KE BANH truoc khi noi.
+    ('control.driver.steering_output_max', 'TRAN SERVO (co khi!)', 0.20, 1.00, 0.05),
+    ('control.v_max', 'TRAN ga (an toan)', 0.00, 0.80, 0.01),
 ]
 
 CONTROL_PARAMS = [
@@ -957,6 +967,24 @@ class LaneTuningUI(object):
         with self._state_lock:
             return (self._man_steer, self._man_throttle)
 
+    def _sync_driver_limits(self):
+        """Day tran servo tu config xuong doi tuong driver.
+
+        Driver clip LAN THU HAI o gia tri no nhan luc duoc tao, va no khong tu
+        doc lai config. Khong dong bo thi keo slider TRAN SERVO se doi con so o
+        engine ma driver van cat o muc cu -> slider nhin nhu hong.
+        """
+        drv = self._driver
+        if drv is None:
+            return
+        for attr, key, dflt in (
+                ('steering_output_min', 'control.driver.steering_output_min', -1.0),
+                ('steering_output_max', 'control.driver.steering_output_max', 1.0)):
+            if hasattr(drv, attr):
+                val = float(self.engine.get_param(key, dflt))
+                if abs(getattr(drv, attr) - val) > 1e-9:
+                    setattr(drv, attr, val)
+
     def _metrics_html(self):
         s = self.engine.stats.summary()
         if s is None:
@@ -1071,6 +1099,7 @@ class LaneTuningUI(object):
             if self._armed and self._driver is not None:
                 with self._driver_lock:
                     try:
+                        self._sync_driver_limits()
                         self._driver.set(steer, throttle)
                     except Exception as exc:
                         self._log('LOI DRIVER -> dung xe: %s' % exc)
