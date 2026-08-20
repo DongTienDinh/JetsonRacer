@@ -1488,74 +1488,105 @@ class LaneTuningUI(object):
                if self.dung_cnn else
                ('#8a6d1f', 'CV CO DIEN (nguong mau) - KHONG dung model')))
 
+    # --- anh xa cho num CUA SOM ------------------------------------------
+    # 0.00 = cua muon, nhe nhang   |   1.00 = xong vao cua som va manh
+    # Mot num viet hai khoa vi chung luon phai di cung nhau: phat hien cua som
+    # (curve_enter thap) ma khong be lai som (feedforward thap) thi chi duoc
+    # bo ga som, xe van cat cua.
+    @staticmethod
+    def _cua_som_to_cfg(p):
+        return {
+            'control.curve_enter': round(0.30 - 0.24 * p, 3),
+            'control.curve_exit': round((0.30 - 0.24 * p) * 0.65, 3),
+            'control.curve_feedforward': round(0.60 + 1.60 * p, 3),
+        }
+
+    @staticmethod
+    def _cfg_to_cua_som(curve_enter):
+        return max(0.0, min(1.0, (0.30 - float(curve_enter)) / 0.24))
+
     def _build_simple_panel(self):
-        """Dung HAI num, moi num viet nhieu khoa config cung luc."""
+        """Bon num. Moi num viet mot NHOM khoa di lien voi nhau."""
         w = self.widgets
         g = self.engine.get_param
+        L = dict(style={'description_width': '150px'},
+                 layout=w.Layout(width='440px'),
+                 readout_format='.2f', continuous_update=False)
 
-        v0 = float(g('control.v_straight', 0.30))
-        s0 = float(g('control.driver.steering_output_max', 0.40))
-
-        toc_do = w.FloatSlider(
-            value=v0, min=0.05, max=0.50, step=0.01, description='TOC DO',
-            readout_format='.2f', continuous_update=False,
-            style={'description_width': '150px'},
-            layout=w.Layout(width='430px'))
+        toc_do = w.FloatSlider(value=float(g('control.v_straight', 0.30)),
+                               min=0.05, max=0.50, step=0.01,
+                               description='TOC DO thang', **L)
+        toc_cua = w.FloatSlider(value=float(g('control.v_corner', 0.12)),
+                                min=0.05, max=0.40, step=0.01,
+                                description='TOC DO trong cua', **L)
+        cua_som = w.FloatSlider(
+            value=self._cfg_to_cua_som(g('control.curve_enter', 0.12)),
+            min=0.0, max=1.0, step=0.05, description='CUA SOM', **L)
         goc_lai = w.FloatSlider(
-            value=s0, min=0.30, max=1.00, step=0.05,
-            description='GOC LAI TOI DA', readout_format='.2f',
-            continuous_update=False,
-            style={'description_width': '150px'},
-            layout=w.Layout(width='430px'))
+            value=float(g('control.driver.steering_output_max', 0.40)),
+            min=0.30, max=1.00, step=0.05,
+            description='GOC LAI TOI DA', **L)
         info = w.HTML()
 
+        def _cap_v_max():
+            # Tran ga phai >= ca hai muc ga, neu khong no cat mat muc cao hon
+            # va num kia nhin nhu hong.
+            hi = max(float(self.engine.get_param('control.v_straight', 0.0)),
+                     float(self.engine.get_param('control.v_corner', 0.0)))
+            self.engine.set_param('control.v_max', round(min(1.0, hi * 1.25), 3))
+
         def _refresh():
+            gp = self.engine.get_param
             info.value = (
                 '<div style="margin-left:154px;font-size:11px;color:#555;'
-                'line-height:1.5">Ga doan thang <b>%.2f</b> &nbsp;|&nbsp; '
-                'ga trong cua <b>%.2f</b> &nbsp;|&nbsp; tran servo <b>%.2f</b>'
-                ' (%.0f%% tam lai)</div>'
-                % (self.engine.get_param('control.v_straight', 0.0),
-                   self.engine.get_param('control.v_corner', 0.0),
-                   self.engine.get_param('control.driver.steering_output_max', 0.0),
-                   100.0 * float(self.engine.get_param(
-                       'control.driver.steering_output_max', 0.0))))
+                'line-height:1.6">vao cua khi do cong &ge; <b>%.2f</b>'
+                ' &nbsp;|&nbsp; be lai som <b>%.2f</b>'
+                ' &nbsp;|&nbsp; tran servo <b>%.2f</b></div>'
+                % (gp('control.curve_enter', 0), gp('control.curve_feedforward', 0),
+                   gp('control.driver.steering_output_max', 0)))
 
-        def on_toc_do(change):
-            v = float(change['new'])
-            # Ga trong cua theo ti le ga thang: vao cua luon phai cham hon, va
-            # de nguoi tune quen ha rieng no la xe vang ra ngoai cua.
+        def mk(fn):
+            def _h(change):
+                fn(float(change['new']))
+                _cap_v_max()
+                _refresh()
+            return _h
+
+        def set_toc_do(v):
             self.engine.set_param('control.v_straight', v)
-            self.engine.set_param('control.v_corner', round(v * 0.55, 3))
-            self.engine.set_param('control.v_max', round(min(1.0, v * 1.25), 3))
-            _refresh()
 
-        def on_goc_lai(change):
-            v = float(change['new'])
-            # Doi CA HAI chieu. Chi doi mot ben thi xe cua duoc mot huong.
+        def set_toc_cua(v):
+            self.engine.set_param('control.v_corner', v)
+
+        def set_cua_som(v):
+            for k, val in self._cua_som_to_cfg(v).items():
+                self.engine.set_param(k, val)
+
+        def set_goc_lai(v):
+            # Doi CA HAI chieu; doi mot ben thi xe chi cua duoc mot huong.
             self.engine.set_param('control.driver.steering_output_max', v)
             self.engine.set_param('control.driver.steering_output_min', -v)
-            _refresh()
 
-        toc_do.observe(on_toc_do, names='value')
-        goc_lai.observe(on_goc_lai, names='value')
+        for sl, fn in ((toc_do, set_toc_do), (toc_cua, set_toc_cua),
+                       (cua_som, set_cua_som), (goc_lai, set_goc_lai)):
+            sl.observe(mk(fn), names='value')
         _refresh()
 
         huong_dan = w.HTML(
             '<hr style="margin:12px 0">'
-            '<div style="font-size:11px;line-height:1.6;max-width:470px">'
-            '<b>TOC DO</b> &mdash; ga o doan thang. Ga trong cua tu tinh theo '
-            '(55%), khong phai chinh rieng.<br>'
-            '<b>GOC LAI TOI DA</b> &mdash; banh be duoc toi dau. Mac dinh 0.40 '
-            'nghia la xe moi dung <b>40% tam lai</b>, do la ly do cua khong noi. '
-            'Keo len de cua gat hon.<br>'
-            '<span style="color:#b00020"><b>CANH BAO:</b> day la gioi han CO '
-            'KHI. Qua muc thi servo ken, keu, co the gay tay lai. KE BANH KHOI '
-            'MAT DAT roi tang tung nac 0.05, nghe tieng servo. Nghe ken thi lui '
-            'lai mot nac.</span><br><br>'
-            '<b>Cua khong noi?</b> Tang GOC LAI TOI DA truoc, roi moi giam TOC DO.'
-            '</div>')
-        return w.VBox([toc_do, goc_lai, info, huong_dan])
+            '<div style="font-size:11px;line-height:1.6;max-width:480px">'
+            '<b>TOC DO thang</b> &mdash; ga o doan thang. Diem thoi gian an o day.<br>'
+            '<b>TOC DO trong cua</b> &mdash; ga khi dang cua. <b>Giam</b> neu xe '
+            'vang ra NGOAI cua &mdash; chay cham thi ban kinh cua nho lai.<br>'
+            '<b>CUA SOM</b> &mdash; xong vao cua som va manh den dau. <b>Tang</b> '
+            'neu xe cua muon, cat vao phia TRONG cua. <b>Giam</b> neu doan thang '
+            'xe luon zigzag.<br>'
+            '<b>GOC LAI TOI DA</b> &mdash; banh be duoc toi dau. <b>Tang</b> neu '
+            'cua khong noi, chay thang ra ngoai lane.<br>'
+            '<span style="color:#b00020"><b>CANH BAO:</b> GOC LAI TOI DA la gioi '
+            'han CO KHI. KE BANH KHOI MAT DAT, tang tung nac 0.05, nghe tieng '
+            'servo. Nghe ken thi lui lai mot nac.</span></div>')
+        return w.VBox([toc_do, toc_cua, cua_som, goc_lai, info, huong_dan])
 
     def _widget_simple(self):
         """Chi camera + bam line + toc do. Dung CHUNG vong dieu khien va CHUNG
