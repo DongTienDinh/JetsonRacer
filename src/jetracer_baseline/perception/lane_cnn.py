@@ -116,36 +116,47 @@ class TensorRTEngine(object):
         self.context = self.engine.create_execution_context()
         self._new_api = hasattr(self.engine, 'num_io_tensors')
 
+        # THU TU BINDING CUA ENGINE KHONG PHAI THU TU KHAI BAO TRONG ONNX.
+        # Do binding nao la vao/ra bang API cua engine, va tra ket qua theo TEN.
+        # Ban dau file nay gia dinh outs[0] = seg, outs[1] = reg -> tren xe
+        # TensorRT tra reg truoc va no gay "cannot reshape array of size 3 into
+        # shape (64,128)". Loi chi lo ra khi co engine that, khong cach nao bat
+        # duoc tren laptop.
         self.host, self.dev, self.names, self.shapes = [], [], [], []
+        self.in_idx, self.out_idx = [], []
         if self._new_api:
-            n = self.engine.num_io_tensors
-            names = [self.engine.get_tensor_name(i) for i in range(n)]
-            for nm in names:
-                shape = tuple(self.engine.get_tensor_shape(nm))
-                dtype = trt.nptype(self.engine.get_tensor_dtype(nm))
-                self._alloc(nm, shape, dtype)
+            for i in range(self.engine.num_io_tensors):
+                nm = self.engine.get_tensor_name(i)
+                is_in = (self.engine.get_tensor_mode(nm) ==
+                         trt.TensorIOMode.INPUT)
+                self._alloc(nm, tuple(self.engine.get_tensor_shape(nm)),
+                            trt.nptype(self.engine.get_tensor_dtype(nm)), is_in)
         else:
             for i in range(self.engine.num_bindings):
-                nm = self.engine.get_binding_name(i)
-                shape = tuple(self.engine.get_binding_shape(i))
-                dtype = trt.nptype(self.engine.get_binding_dtype(i))
-                self._alloc(nm, shape, dtype)
+                self._alloc(self.engine.get_binding_name(i),
+                            tuple(self.engine.get_binding_shape(i)),
+                            trt.nptype(self.engine.get_binding_dtype(i)),
+                            self.engine.binding_is_input(i))
+        if not self.in_idx or not self.out_idx:
+            raise RuntimeError('Engine khong co du input/output: %s' % self.names)
         self.stream = cuda.Stream()
         self.bindings = [int(d) for d in self.dev]
 
-    def _alloc(self, name, shape, dtype):
-        size = int(np.prod(shape))
-        host = self._cuda.pagelocked_empty(size, dtype)
+    def _alloc(self, name, shape, dtype, is_input):
+        idx = len(self.host)
+        host = self._cuda.pagelocked_empty(int(np.prod(shape)), dtype)
         self.host.append(host)
         self.dev.append(self._cuda.mem_alloc(host.nbytes))
         self.names.append(name)
         self.shapes.append(shape)
+        (self.in_idx if is_input else self.out_idx).append(idx)
 
     def infer(self, x):
-        """x: float32 (1,3,H,W) lien tuc -> list output theo dung thu tu."""
+        """x: float32 (1,3,H,W) lien tuc -> dict {ten: mang}."""
         cuda = self._cuda
-        np.copyto(self.host[0], x.ravel())
-        cuda.memcpy_htod_async(self.dev[0], self.host[0], self.stream)
+        i0 = self.in_idx[0]
+        np.copyto(self.host[i0], x.ravel())
+        cuda.memcpy_htod_async(self.dev[i0], self.host[i0], self.stream)
         if self._new_api:
             for nm, d in zip(self.names, self.dev):
                 self.context.set_tensor_address(nm, int(d))
@@ -153,11 +164,11 @@ class TensorRTEngine(object):
         else:
             self.context.execute_async_v2(bindings=self.bindings,
                                           stream_handle=self.stream.handle)
-        for i in range(1, len(self.host)):
+        for i in self.out_idx:
             cuda.memcpy_dtoh_async(self.host[i], self.dev[i], self.stream)
         self.stream.synchronize()
-        return [self.host[i].reshape(self.shapes[i])
-                for i in range(1, len(self.host))]
+        return dict((self.names[i], self.host[i].reshape(self.shapes[i]))
+                    for i in self.out_idx)
 
 
 class OnnxEngine(object):
@@ -178,9 +189,11 @@ class OnnxEngine(object):
         self.sess = ort.InferenceSession(
             onnx_path, opt, providers=['CPUExecutionProvider'])
         self.input_name = self.sess.get_inputs()[0].name
+        self.out_names = [o.name for o in self.sess.get_outputs()]
 
     def infer(self, x):
-        return self.sess.run(None, {self.input_name: x})
+        outs = self.sess.run(None, {self.input_name: x})
+        return dict(zip(self.out_names, outs))
 
 
 class CnnLaneDetector(object):
@@ -218,6 +231,8 @@ class CnnLaneDetector(object):
 
         self.last_infer_ms = 0.0
         self.last_total_ms = 0.0
+        self.last_mask = None      # mask ROI 256x128 do model xuat ra
+        self.last_bev = None       # cung mask do sau khi warp sang BEV
         self.n_disagree = 0
         self._reset_state()
         if self.engine is not None:
@@ -283,6 +298,10 @@ class CnnLaneDetector(object):
         canvas = np.zeros((PROC_H, PROC_W), np.uint8)
         canvas[self.roi_y0:, :] = m
         bev = cv2.warpPerspective(canvas, self.M, (PROC_W, PROC_H))
+        # Giu lai de giao dien tune ve duong fit chong len - `lane.py` cung tra
+        # anh BEV trong `LaneResult.debug`, giu dung quy uoc do thi panel BEV
+        # cua tuning_ui khong phai biet minh dang xem CV hay CNN.
+        self.last_bev = bev
 
         band_h = max(1, PROC_H // N_BANDS)
         pts, npix = [], 0
@@ -305,6 +324,27 @@ class CnnLaneDetector(object):
             co = np.array([0.0, co[0], co[1]])
         return co, float(ts.max()), len(pts), npix
 
+    @staticmethod
+    def _pick_outputs(outs):
+        """Lay seg/reg tu dict output. Uu tien TEN, du phong theo KICH THUOC.
+
+        Du phong ton tai vi mot so ban TensorRT doi ten binding khi build engine.
+        Hai dau ra co kich thuoc chenh nhau rat xa (8192 vs 3) nen phan biet bang
+        kich thuoc la an toan tuyet doi o bai nay.
+        """
+        seg, reg = outs.get('seg'), outs.get('reg')
+        if seg is None or reg is None:
+            for v in outs.values():
+                if v.size == SEG_H * SEG_W:
+                    seg = v
+                elif v.size == 3:
+                    reg = v
+        if seg is None:
+            raise RuntimeError(
+                'Khong tim thay dau ra seg trong engine. Cac dau ra: %s'
+                % dict((k, v.shape) for k, v in outs.items()))
+        return seg, (None if reg is None else reg.ravel())
+
     # ------------------------------------------------------------------ chay
     def process(self, frame_bgr):
         if self.engine is None:
@@ -318,8 +358,8 @@ class CnnLaneDetector(object):
         outs = self.engine.infer(x)
         self.last_infer_ms = (time.time() - t1) * 1000.0
 
-        seg = outs[0].reshape(SEG_H, SEG_W)
-        reg = outs[1].ravel() if len(outs) > 1 else None
+        seg, reg = self._pick_outputs(outs)
+        seg = seg.reshape(SEG_H, SEG_W)
 
         # Nguong 0 tren logits == sigmoid > 0.5. Model co y khong co Sigmoid.
         mask = (seg > 0).astype(np.uint8) * 255
@@ -327,11 +367,12 @@ class CnnLaneDetector(object):
         # buoc se cho so khac di - it thoi, nhung du de moi con so do o PC khong
         # con dung tren xe.
         mask = cv2.resize(mask, (IN_W, IN_H), interpolation=cv2.INTER_NEAREST)
+        self.last_mask = mask
 
         co, t_max, n_bands, npix = self.mask_to_fit(mask)
         if co is None:
             self.last_total_ms = (time.time() - t0) * 1000.0
-            return LaneResult(False, self._cte, self._curv, npix, mask,
+            return LaneResult(False, self._cte, self._curv, npix, self.last_bev,
                               cte_lookahead=self._look, n_bands=n_bands)
 
         half = PROC_W / 2.0
@@ -348,8 +389,9 @@ class CnnLaneDetector(object):
             if abs(float(reg[0]) - raw_cte) > self.reg_disagree:
                 self.n_disagree += 1
                 self.last_total_ms = (time.time() - t0) * 1000.0
-                return LaneResult(False, self._cte, self._curv, npix, mask,
-                                  cte_lookahead=self._look, n_bands=n_bands)
+                return LaneResult(False, self._cte, self._curv, npix,
+                                  self.last_bev, cte_lookahead=self._look,
+                                  n_bands=n_bands)
 
         if not self._init:
             self._cte, self._look, self._curv = raw_cte, raw_look, raw_curv
@@ -361,16 +403,16 @@ class CnnLaneDetector(object):
             self._curv = a * raw_curv + (1.0 - a) * self._curv
 
         self.last_total_ms = (time.time() - t0) * 1000.0
-        return LaneResult(True, self._cte, self._curv, npix, mask,
+        return LaneResult(True, self._cte, self._curv, npix, self.last_bev,
                           cte_lookahead=self._look, n_bands=n_bands, fit=co)
 
     def debug_process(self, frame_bgr):
         res = self.process(frame_bgr)
         return {
             'small': cv2.resize(frame_bgr, (PROC_W, PROC_H)),
-            'binary': res.debug,
-            'masked': res.debug,
-            'warped': res.debug,
+            'binary': self.last_mask,
+            'masked': self.last_mask,
+            'warped': self.last_bev,
             'roi_y': (self.roi_y0, PROC_H),
             'result': res,
             'infer_ms': self.last_infer_ms,

@@ -37,7 +37,7 @@ from .control.corner import CornerController
 from .control.driver import servo_output_for
 from .control.driver import build_driver
 from .control.pid import PID
-from .perception.lane import LaneDetector
+from .perception import build_lane_detector
 from .manual_collection import (
     DatasetSessionWriter, shape_steering, shape_throttle, slew_towards)
 from .perception.shading import ShadingCorrector
@@ -255,7 +255,7 @@ class LaneTuningEngine(object):
         _effective = ShadingCorrector.from_config(cfg)
         self.shading_coeff_r = list(_effective.coeff_r)
         self.shading_coeff_b = list(_effective.coeff_b)
-        self.lane = LaneDetector(cfg)
+        self.lane = build_lane_detector(cfg)
         self.pid = PID(cfg.get('control.pid.kp', 0.6),
                        cfg.get('control.pid.ki', 0.0),
                        cfg.get('control.pid.kd', 0.1),
@@ -356,8 +356,17 @@ class LaneTuningEngine(object):
 
         y0 = int(ph * float(self.cfg.get('lane.roi_top', 0.55)))
         mask = np.zeros((ph, pw), np.uint8)
-        if ph > y0:
-            mask[y0:, :] = self.lane._binarise(proc[y0:, :])
+        if hasattr(self.lane, '_binarise'):
+            # CV co dien: mask mau tinh lai tren dung anh proc dang hien thi.
+            if ph > y0:
+                mask[y0:, :] = self.lane._binarise(proc[y0:, :])
+        elif getattr(self.lane, 'last_mask', None) is not None:
+            # CNN: mask model xuat ra o khong gian ROI (256x128) - keo ve dung o
+            # ROI cua anh proc de chong len camera. KHONG dung `res.debug`: cho
+            # do la anh BEV, dung cho panel 3.
+            if ph > y0:
+                mask[y0:, :] = cv2.resize(self.lane.last_mask, (pw, ph - y0),
+                                          interpolation=cv2.INTER_NEAREST)
 
         # (1) anh that + mask phu len + duong ROI
         overlay = proc.copy()
