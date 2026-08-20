@@ -724,6 +724,8 @@ class LaneTuningUI(object):
         self.lane_box = self._build_sliders(
             CNN_LANE_PARAMS if self.dung_cnn else LANE_PARAMS)
         self.simple_box = None      # che do don gian tu dung num rieng
+        self._logger = None
+        self.log_dir = str(self.engine.get_param('logging.dir', 'logs'))
         self.control_box = self._build_sliders(CONTROL_PARAMS)
         self.manual_box = self._build_sliders(MANUAL_PARAMS,
                                               on_change=self._apply_manual)
@@ -754,6 +756,12 @@ class LaneTuningUI(object):
                                        layout=widgets.Layout(width='190px'))
         self.btn_record = widgets.Button(description='GHI VIDEO',
                                          layout=widgets.Layout(width='150px'))
+        # Ghi CSV ngay tu giao dien. Truoc day chi CLI moi ghi, nen muon co so
+        # lieu de phan tich la phai bo giao dien ra chay lenh khac - it ai lam,
+        # va the la tune bang cam giac.
+        self.btn_log = widgets.Button(description='GHI LOG (csv)',
+                                      button_style='info')
+        self.btn_log.on_click(self._on_log)
         self.btn_reset = widgets.Button(description='Xoa thong ke')
         self.btn_save = widgets.Button(description='LUU CONFIG',
                                        button_style='success')
@@ -920,6 +928,7 @@ class LaneTuningUI(object):
                 self._cv_steer = result['steer']
                 self._cv_throttle = result['throttle']
 
+            self._write_log_row(result, frame_id, now)
             self._record_frame(frame, frame_id, result, now)
             self._record_dataset(frame, frame_id, result, now,
                                  time.monotonic())
@@ -961,6 +970,47 @@ class LaneTuningUI(object):
     def _manual_command(self):
         with self._state_lock:
             return (self._man_steer, self._man_throttle)
+
+    def _on_log(self, _b=None):
+        from .logging_csv import RunLogger
+        if self._logger is not None:
+            path = self._logger.path
+            n = self._logger.n_rows
+            self._logger.close()
+            self._logger = None
+            self.btn_log.description = 'GHI LOG (csv)'
+            self.btn_log.button_style = 'info'
+            self._log('Da dong log: %s (%d dong)' % (path, n))
+            return
+        self._logger = RunLogger(self.log_dir, 'tune')
+        self.btn_log.description = 'DANG GHI - bam de dung'
+        self.btn_log.button_style = 'warning'
+        self._log('Bat dau ghi log: %s' % self._logger.path)
+
+    def _write_log_row(self, result, frame_id, now):
+        if self._logger is None:
+            return
+        res = result['lane']
+        try:
+            self._logger.write(
+                timestamp=now, frame_id=frame_id, fps=self._fps,
+                latency_ms=getattr(self.engine.lane, 'last_total_ms', 0.0),
+                decision=result['mode'],
+                control_output='steer=%.3f;throttle=%.3f'
+                               % (result['steer'], result['throttle']),
+                cte=res.cte, cte_lookahead=res.cte_lookahead,
+                curvature=res.curvature, lane_found=1 if res.found else 0,
+                n_bands=res.n_bands, throttle=result['throttle'],
+                drive_mode=result['mode'],
+                state='ARMED' if self._armed else 'IDLE',
+                event='HARD_LIMIT' if result.get('servo_clipped') else '')
+        except Exception as exc:
+            self._log('Loi ghi log -> dung ghi: %s' % exc)
+            try:
+                self._logger.close()
+            except Exception:
+                pass
+            self._logger = None
 
     def _sync_driver_limits(self):
         """Day tran servo tu config xuong doi tuong driver.
@@ -1516,10 +1566,10 @@ class LaneTuningUI(object):
         # Dai noi rong de dua toc do. Tran an toan that su van la
         # `control.v_max`, tu nang theo hai num nay.
         toc_do = w.FloatSlider(value=float(g('control.v_straight', 0.30)),
-                               min=0.05, max=0.85, step=0.01,
+                               min=0.05, max=1.00, step=0.01,
                                description='TOC DO thang', **L)
         toc_cua = w.FloatSlider(value=float(g('control.v_corner', 0.12)),
-                                min=0.05, max=0.65, step=0.01,
+                                min=0.05, max=1.00, step=0.01,
                                 description='TOC DO trong cua', **L)
         cua_som = w.FloatSlider(
             value=self._cfg_to_cua_som(g('control.curve_enter', 0.12)),
@@ -1614,6 +1664,7 @@ class LaneTuningUI(object):
             self._nguon_banner(),
             canh_bao,
             w.HBox([self.btn_open, self.btn_run, self.btn_halt, self.btn_stop]),
+            w.HBox([self.btn_log]),
             w.HBox([self.preview,
                     w.VBox([w.HTML('<b style="font-size:14px">DIEU CHINH</b>'),
                             self._build_simple_panel(), self.btn_close])]),
@@ -1685,6 +1736,11 @@ class LaneTuningUI(object):
         return self
 
     def close(self):
+        if self._logger is not None:
+            self._log('Dong log: %s (%d dong)'
+                      % (self._logger.path, self._logger.n_rows))
+            self._logger.close()
+            self._logger = None
         self._stop_event.set()
         self._control_stop.set()
         self._disarm()

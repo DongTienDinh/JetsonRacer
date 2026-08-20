@@ -73,3 +73,13 @@ control:
     # phản hồi ở khoảng giữa mạnh hơn — đúng thứ đang thiếu khi vào cua.
     # Dấu ÂM giữ nguyên: servo lắp ngược, đổi dấu là xe lái ngược vào lane.
     steering_gain: -1.00
+
+    # Ga cũng bị chặn giống hệt lái: lệnh ga × throttle_gain mới tới motor, nên
+    # với 0.80 thì kéo núm TỐC ĐỘ lên 1.00 vẫn chỉ ra 0.80 công suất. Đặt 1.00
+    # để núm điều khiển được toàn dải.
+    #
+    # LƯU Ý: giá trị 0.80 lấy từ control.txt của BTC. Đổi ở đây chỉ ảnh hưởng
+    # đường CNN; bỏ `--override configs/cnn.yaml` là về 0.80 ngay. Trần thật sự
+    # vẫn là `control.v_max`, tự nâng theo hai núm tốc độ — nên xe không tự
+    # nhiên nhanh hơn cho tới khi bạn kéo núm lên.
+    throttle_gain: 1.00
