@@ -50,6 +50,11 @@ control:
   curve_feedforward: 1.80  # 0.90 -> 1.80  bẻ ngay khi THẤY cua
   corner_steer_gain: 2.40  # 1.60 -> 2.40
   slowdown: 0.20           # 0.12 -> 0.20  lệch nhiều thì bỏ ga mạnh hơn
+  # Đường đua có khúc chữ S ở sườn trái. Độ cong đi qua 0 tại điểm đảo chiều,
+  # nên hysteresis thuần theo độ cong sẽ thả xe về chế độ THẲNG ngay giữa khúc
+  # S và ga vọt lên đúng lúc phải đảo lái. Giữ ga cua thêm 0.7 s để hai thuỳ
+  # chữ S thành một khúc cua liền.
+  corner_hold_s: 0.70
 
   # Mở hết trần MỀM. Trần thật còn lại là `driver.steering_output_max` bên dưới
   # — đó là giới hạn CƠ KHÍ, chỉnh bằng núm "GOC LAI TOI DA" trên giao diện.

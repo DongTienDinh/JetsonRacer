@@ -39,6 +39,7 @@ class CornerController(object):
         self._throttle = 0.0
         self.steer_wanted = 0.0
         self.steer_limit = self.steer_max
+        self._hold = 0.0
 
     def reset_from_config(self, cfg):
         c = cfg.get
@@ -56,6 +57,15 @@ class CornerController(object):
             # mot khoang tre toi thieu thay vi im lang chay sai.
             self.curve_exit = self.curve_enter * 0.7
 
+        # GIU GA CUA THEM MOT LUC sau khi ra khoi cua.
+        # Ly do: o khuc chu S, do cong di qua 0 khi doi chieu. Nguong hysteresis
+        # thuan tuy theo do cong se tha xe ve che do THANG dung luc do - do tren
+        # ho so chu S cua duong dua: ga vot 0.120 -> 0.200 trong 3 frame roi tut
+        # lai ngay. Tuc la xe TANG TOC dung luc phai dao lai, cho nen no vang
+        # ra ngoai o thuy thu hai.
+        # Giu them `corner_hold_s` giay lam hai thuy chu S thanh MOT khuc cua
+        # lien, khong con khe ho de ga vot len.
+        self.corner_hold_s = float(c('control.corner_hold_s', 0.0))
         self.slowdown = float(c('control.slowdown', 0.12))
         self.curve_feedforward = float(c('control.curve_feedforward', 0.9))
         self.corner_steer_gain = float(c('control.corner_steer_gain', 1.6))
@@ -77,6 +87,7 @@ class CornerController(object):
         self._throttle = 0.0
         self.steer_wanted = 0.0
         self.steer_limit = self.steer_max
+        self._hold = 0.0
 
     # ------------------------------------------------------------------ mode
     def update_mode(self, curvature):
@@ -109,7 +120,14 @@ class CornerController(object):
         self.steer_limit = limit
 
         # --- ga: chon muc theo che do, roi tru theo do lech ---------------
-        target = self.v_corner if mode == CORNER else self.v_straight
+        if mode == CORNER:
+            self._hold = self.corner_hold_s
+        else:
+            self._hold = max(0.0, self._hold - dt)
+        # `_hold > 0` = vua ra khoi cua chua lau -> van giu ga cua. Xem docstring
+        # cua `corner_hold_s`: day la thu giu hai thuy chu S lien lai voi nhau.
+        in_corner_speed = (mode == CORNER) or (self._hold > 0.0)
+        target = self.v_corner if in_corner_speed else self.v_straight
         target -= self.slowdown * abs(float(cte))
         if not lane_found:
             # Mat vach thi khong duoc giu ga doan thang: xe dang lai theo gia
