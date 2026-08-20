@@ -30,6 +30,13 @@ wandb/
 *.log
 
 # Du lieu va model (dung LFS hoac luu ngoai repo)
+# `data/` chi khop THU MUC. File nen nhu data.zip van lot qua -> phai bat rieng.
+# GitHub tu choi file > 100 MB o phia server, va luc do commit da tao roi nen
+# phai sua lai lich su chu khong chi them dong vao day.
+*.zip
+*.tar
+*.tar.gz
+*.7z
 data/
 datasets/
 models/
@@ -66,3 +73,6 @@ Desktop.ini
 *.temp
 *.swp
 *~
+
+# Pipeline train tren PC - KHONG day len Jetson (dataset, checkpoint, notebook train)
+training/

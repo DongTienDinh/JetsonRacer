@@ -41,7 +41,7 @@ import numpy as np  # noqa: E402
 
 from jetracer_baseline.camera import build_source  # noqa: E402
 from jetracer_baseline.config import load_config   # noqa: E402
-from jetracer_baseline.perception.lane import LaneDetector
+from jetracer_baseline.perception import build_lane_detector
 from jetracer_baseline.camera import shading_applied_at_source
 from jetracer_baseline.perception.shading import ShadingCorrector  # noqa: E402
 
@@ -98,7 +98,7 @@ def build_panel(dbg, cfg, title):
 
 
 def run_once(cfg, source, frames, every, out_dir, tag):
-    det = LaneDetector(cfg)
+    det = build_lane_detector(cfg)
     # PHAI sua mau truoc khi tune nguong, dung y het vong chay tren xe.
     # Tune tren anh chua sua se ra nguong bu lai cho am do o vien - roi khi chay
     # that (co sua mau) thi nguong do lai sai. Hai duong xu ly phai giong nhau.
@@ -148,6 +148,9 @@ def run_once(cfg, source, frames, every, out_dir, tag):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Tune nguong bam lane')
     parser.add_argument('--config', default='configs/default.yaml')
+    parser.add_argument('--override', action='append', default=[],
+                        help='file config de trong len tren, co the lap lai. '
+                             'Vd: --override configs/cnn.yaml de xem mask CNN')
     parser.add_argument('--source', choices=['csi', 'video', 'synthetic'],
                         default='csi')
     parser.add_argument('--video', default=None)
@@ -170,7 +173,7 @@ def main(argv=None):
 
     scores = []
     for key, value in values:
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, args.override)
         if key:
             cfg.set('lane.' + key, value)
             tag = '%s_%s' % (key, str(value).replace('.', 'p').replace('-', 'm'))

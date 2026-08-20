@@ -1,0 +1,26 @@
+# Bật model CNN bám đường tâm. Dùng làm file ĐÈ, không thay default.yaml:
+#
+#   python3 -m src.jetracer_baseline.cli run --task speed --driver nvidia \
+#       --override configs/cnn.yaml
+#
+# Bỏ cờ --override là quay lại CV cổ điển ngay, không phải sửa file nào.
+# Ngày thi cần đổi qua đổi lại trong 5 phút chuẩn bị thì đây là cách duy nhất
+# an toàn — sửa default.yaml rồi sửa ngược lại dưới áp lực là cách mất lượt.
+#
+# YÊU CẦU TRƯỚC KHI DÙNG:
+#   1. Đã build engine TRÊN CHÍNH XE (engine không chuyển máy được):
+#        /usr/src/tensorrt/bin/trtexec --onnx=lane_tiny.onnx --fp16 \
+#            --workspace=256 --saveEngine=models/lane_tiny.engine
+#   2. Đã đo latency:      python3 tools/bench_lane_cnn.py
+#   3. Đã kiểm tra DẤU cte: python3 tools/bench_lane_cnn.py --watch --source csi
+#      (đẩy xe sang trái → cte âm; sang phải → cte dương. Sai dấu thì DỪNG.)
+
+lane:
+  mode: cnn
+  cnn:
+    # trt  = TensorRT, dùng trên xe.
+    # onnx = ONNXRuntime, CHẬM HƠN NHIỀU — chỉ để chạy thử toàn bộ đường deploy
+    #        trên laptop khi không có Jetson, hoặc làm lưới an toàn nếu trtexec
+    #        không build được vào phút chót.
+    backend: trt
+    engine: models/lane_tiny.engine

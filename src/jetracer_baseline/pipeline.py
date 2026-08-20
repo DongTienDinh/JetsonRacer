@@ -29,7 +29,8 @@ from .control.corner import CornerController
 from .control.driver import build_driver
 from .control.pid import PID
 from .logging_csv import RunLogger
-from .perception.lane import LaneDetector
+from .perception import build_lane_detector
+from .perception.lane import LaneDetector  # noqa: F401  giu cho code cu import
 from .perception.shading import ShadingCorrector
 from .perception.signs import SignTracker, build_detector
 from .perception.stopline import StoplineDetector
@@ -162,7 +163,7 @@ class Runner(object):
             self.shading = ShadingCorrector.from_config(cfg)
         self.proc_size = (int(cfg.get('pipeline.proc_width', 320)),
                           int(cfg.get('pipeline.proc_height', 240)))
-        self.lane = LaneDetector(cfg)
+        self.lane = build_lane_detector(cfg)
         self.stopline = StoplineDetector(cfg)
         self.tracker = SignTracker(cfg)
         self.detector = build_detector(cfg, script=detector_script)

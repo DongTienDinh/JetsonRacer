@@ -1,0 +1,8 @@
+# Ga thấp cho lượt chạy thử đầu tiên trên sa bàn thật.
+# Dùng CHỒNG lên cnn.yaml:
+#   --override configs/cnn.yaml --override configs/slow.yaml
+# Chạy ổn rồi thì bỏ file này ra trước, giữ cnn.yaml.
+control:
+  v_straight: 0.15
+  v_corner: 0.10
+  v_max: 0.18          # trần an toàn tuyệt đối cho lượt thử

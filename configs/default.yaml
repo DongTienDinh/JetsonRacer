@@ -78,7 +78,27 @@ manual:
 
 lane:
   # MỤC TIÊU BÁM: vạch ĐỨT ở CHÍNH GIỮA sa bàn (không phải viền lane).
-  mode: color_center       # color_center | gray (gray = bản cũ, giữ để so sánh)
+  # color_center | gray (gray = bản cũ, giữ để so sánh) | cnn
+  mode: color_center
+
+  # --- mode: cnn — model segmentation đường tâm chạy trên TensorRT ---
+  # Chỉ dùng khi ĐÃ build engine TRÊN CHÍNH XE. Engine không chuyển máy được.
+  # Đổi `mode: cnn` là đổi toàn bộ nguồn mask; PID/FSM/driver giữ nguyên.
+  cnn:
+    engine: models/lane_tiny.engine
+    # Bất đồng ý cho phép giữa seg head và reg head của model. Vượt ngưỡng =
+    # hai đường tính độc lập trong model cho kết quả khác nhau -> báo MẤT VẠCH
+    # để FSM hạ ga / rơi về CV, thay vì lái theo con số model cũng không chắc.
+    check_reg: true
+    reg_disagree: 0.35
+    min_bands: 2
+    band_min_pixels: 10
+    # CỐ Ý tách khỏi `lane.warp_src` ở dưới: khoá đó để tune đường CV. Ai đó
+    # chỉnh nó cho CV sẽ làm lệch âm thầm hình học của CNN — mà hình học CNN
+    # phải khớp đúng với lúc train, sai là model tệ đi mà KHÔNG báo lỗi gì.
+    roi_top: 0.55
+    warp_src: [[0.10, 1.00], [0.90, 1.00], [0.62, 0.58], [0.38, 0.58]]
+    warp_dst_margin: 0.25
 
   # MÀU VẠCH GIỮA — đổi sa bàn thì đổi đúng dòng này, không sửa code:
   #   red   : sa bàn tập hiện tại (vạch đứt đỏ trên sàn sáng)
