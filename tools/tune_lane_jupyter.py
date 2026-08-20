@@ -45,6 +45,9 @@ def launch(config_path='configs/default.yaml', source_kind='csi',
     KHONG co lenh nao xuong phan cung cho den khi bam nut CHAY. `driver_kind`
     de trong -> camera that dung 'nvidia', replay video dung 'dryrun'.
     """
+    print('NGUON BAM VACH: %s'
+          % ('MODEL CNN (co configs/cnn.yaml)' if overrides else
+             'CV co dien (KHONG co override -> KHONG dung model)'))
     return launch_tuning_ui(config_path=config_path, source_kind=source_kind,
                             video_path=video_path, driver_kind=driver_kind,
                             save_path=save_path, soft_start_s=soft_start_s,
@@ -64,4 +67,8 @@ if __name__ == '__main__':
               'from jetracer_baseline.tuning_ui import LaneTuningEngine; '
               'print(LaneTuningEngine().proc_size)"')
     else:
-        ui = launch()
+        # `%run -i` chay file NAY trong namespace cua notebook, nen OVERRIDES do
+        # cell dau dat ra nhin thay duoc o day. Thieu `-i` thi khong thay, va
+        # giao dien se mo bang CV du cell dau da bat DUNG_CNN - loi im lang,
+        # chi phat hien duoc nho bang mau trong tab "Bam vach".
+        ui = launch(overrides=globals().get('OVERRIDES'))
