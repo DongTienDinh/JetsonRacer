@@ -38,14 +38,23 @@ def frames_from(source, cfg, n, video):
     if source == 'csi' or source == 'video':
         from src.jetracer_baseline.camera import build_source, LatestFrameGrabber
         src = build_source(cfg, source, video_path=video)
-        grab = LatestFrameGrabber(src)
-        grab.start()
-        out = []
+        grab = LatestFrameGrabber(src).start()
+        if grab.error is not None:
+            grab.stop()
+            raise RuntimeError('Camera khong khoi dong duoc: %s' % grab.error)
+        out, last_id = [], -1
+        t0 = time.time()
         while len(out) < n:
-            f = grab.latest()
-            if f is not None:
-                out.append(f[0] if isinstance(f, tuple) else f)
-            time.sleep(0.005)
+            # `read()` tra ve (frame, frame_id). Loc theo frame_id de khong dem
+            # mot khung hinh nhieu lan khi camera cham hon vong lay.
+            frame, fid = grab.read()
+            if frame is not None and fid != last_id:
+                out.append(frame)
+                last_id = fid
+            elif time.time() - t0 > 20.0:
+                grab.stop()
+                raise RuntimeError('Camera khong tra ve frame moi sau 20 s')
+            time.sleep(0.003)
         grab.stop()
         return out
     rng = np.random.default_rng(0) if hasattr(np.random, 'default_rng') else None
@@ -71,21 +80,32 @@ def watch(det, cfg, args):
     from src.jetracer_baseline.camera import build_source, LatestFrameGrabber
     src = build_source(cfg, args.source if args.source != 'synthetic' else 'csi',
                        video_path=args.video)
-    grab = LatestFrameGrabber(src)
-    grab.start()
-    print('\nDAY XE SANG TRAI -> cte am.  SANG PHAI -> cte duong.')
-    print('Sai dau = DUNG LAI, dung chay tiep.   Ctrl-C de thoat.\n')
+    grab = LatestFrameGrabber(src).start()
+    if grab.error is not None:
+        grab.stop()
+        print('Camera khong khoi dong duoc: %s' % grab.error)
+        return 2
+    print('\nVACH TROI SANG PHAI trong khung hinh -> cte DUONG.')
+    print('   (tuc la day xe sang TRAI thi cte duong - vach trong anh di nguoc')
+    print('    chieu voi xe. Day la quy uoc cua lane.py, CNN dung y het.)')
+    print('Sai chieu = DUNG LAI, dung chay tiep.   Ctrl-C de thoat.\n')
     print('%-7s %8s %8s %8s %7s %8s' %
           ('vach', 'cte', 'lookah', 'curv', 'band', 'infer ms'))
     try:
         while True:
-            f = grab.latest()
-            if f is None:
+            frame, _fid = grab.read()
+            if frame is None:
                 time.sleep(0.02)
                 continue
-            frame = f[0] if isinstance(f, tuple) else f
             r = det.process(frame)
-            arrow = '<<<' if r.cte < -0.08 else ('>>>' if r.cte > 0.08 else ' | ')
+            if not r.found:
+                arrow = '-- MAT VACH --'
+            elif r.cte < -0.08:
+                arrow = '<<< vach ben TRAI'
+            elif r.cte > 0.08:
+                arrow = 'vach ben PHAI >>>'
+            else:
+                arrow = '   | giua'
             print('%-7s %+8.3f %+8.3f %+8.3f %7d %8.2f  %s'
                   % ('CO' if r.found else 'MAT', r.cte, r.cte_lookahead,
                      r.curvature, r.n_bands, det.last_infer_ms, arrow))
