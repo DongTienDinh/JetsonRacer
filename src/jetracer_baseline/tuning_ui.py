@@ -1573,8 +1573,11 @@ class LaneTuningUI(object):
         """Bon num. Moi num viet mot NHOM khoa di lien voi nhau."""
         w = self.widgets
         g = self.engine.get_param
-        L = dict(style={'description_width': '150px'},
-                 layout=w.Layout(width='440px'),
+        # Nhan hep lai va slider ngan lai de o doc so KHONG bi cot phai cat mat.
+        # Truoc day nhan 150px + slider 440px bi tran ra ngoai cot, nguoi dung
+        # chi thay mot chu so o ria.
+        L = dict(style={'description_width': '128px'},
+                 layout=w.Layout(width='340px'),
                  readout_format='.2f', continuous_update=False)
 
         # Dai noi rong de dua toc do. Tran an toan that su van la
@@ -1596,7 +1599,14 @@ class LaneTuningUI(object):
             value=float(g('control.driver.steering_output_max', 0.40)),
             min=0.30, max=1.00, step=0.05,
             description='GOC LAI TOI DA', **L)
+        # Moi num mot dong so RIENG ngay duoi. Doc dam, luon hien du cot hep.
+        notes = dict((k, w.HTML()) for k in
+                     ('toc_do', 'toc_cua', 'cua_som', 'phanh', 'goc_lai'))
         info = w.HTML()
+
+        def _n(html):
+            return ('<div style="margin:-8px 0 10px 132px;font-size:11px;'
+                    'color:#333;line-height:1.4">%s</div>' % html)
 
         def _cap_v_max():
             # Tran ga phai >= ca hai muc ga, neu khong no cat mat muc cao hon
@@ -1607,6 +1617,27 @@ class LaneTuningUI(object):
 
         def _refresh():
             gp = self.engine.get_param
+            notes['toc_do'].value = _n(
+                'ga doan thang = <b>%.2f</b> &nbsp; (tran ga tu nang: '
+                '<b>%.2f</b>)' % (gp('control.v_straight', 0),
+                                  gp('control.v_max', 0)))
+            notes['toc_cua'].value = _n(
+                'ga trong cua = <b>%.2f</b> &nbsp; (= <b>%.0f%%</b> ga thang)'
+                % (gp('control.v_corner', 0),
+                   100.0 * float(gp('control.v_corner', 0))
+                   / max(float(gp('control.v_straight', 1)), 1e-6)))
+            notes['cua_som'].value = _n(
+                'vao cua khi do cong &ge; <b>%.2f</b> &nbsp;|&nbsp; be lai som '
+                '<b>%.2f</b>' % (gp('control.curve_enter', 0),
+                                 gp('control.curve_feedforward', 0)))
+            notes['phanh'].value = _n(
+                'phanh theo do cong <b>%.2f</b> &nbsp;|&nbsp; theo do lech '
+                '<b>%.2f</b>' % (gp('control.curve_brake', 0),
+                                 gp('control.slowdown', 0)))
+            tran_sv = float(gp('control.driver.steering_output_max', 0))
+            notes['goc_lai'].value = _n(
+                'tran servo = <b>%.2f</b> &nbsp; (<b>%.0f%%</b> tam lai)'
+                % (tran_sv, 100.0 * tran_sv))
             # Neu lai da cham tran, tang toc chi lam xe chay rong hon. Bao ngay
             # o day thay vi de nguoi dung tu doc chu HARD-LIMIT tren panel.
             tran = float(gp('control.driver.steering_output_max', 0.0))
@@ -1616,16 +1647,8 @@ class LaneTuningUI(object):
                         'moi %.2f - neu panel hien <b>HARD-LIMIT</b> thi lai da '
                         'bao hoa, tang toc se chay rong ra ngoai cua.</span>'
                         % tran)
-            info.value = (
-                '<div style="margin-left:154px;font-size:11px;color:#555;'
-                'line-height:1.6">vao cua khi do cong &ge; <b>%.2f</b>'
-                ' &nbsp;|&nbsp; be lai som <b>%.2f</b><br>'
-                'phanh theo do cong <b>%.2f</b>'
-                ' &nbsp;|&nbsp; phanh theo do lech <b>%.2f</b>'
-                ' &nbsp;|&nbsp; tran servo <b>%.2f</b></div>'
-                % (gp('control.curve_enter', 0), gp('control.curve_feedforward', 0),
-                   gp('control.curve_brake', 0), gp('control.slowdown', 0),
-                   gp('control.driver.steering_output_max', 0)) + canh)
+            info.value = ('<div style="margin-left:132px;font-size:11px">%s'
+                          '</div>' % canh) if canh else ''
 
         def mk(fn):
             def _h(change):
@@ -1676,8 +1699,12 @@ class LaneTuningUI(object):
             '<span style="color:#b00020"><b>CANH BAO:</b> GOC LAI TOI DA la gioi '
             'han CO KHI. KE BANH KHOI MAT DAT, tang tung nac 0.05, nghe tieng '
             'servo. Nghe ken thi lui lai mot nac.</span></div>')
-        return w.VBox([toc_do, toc_cua, cua_som, phanh, goc_lai, info,
-                       huong_dan])
+        return w.VBox([toc_do, notes['toc_do'],
+                       toc_cua, notes['toc_cua'],
+                       cua_som, notes['cua_som'],
+                       phanh, notes['phanh'],
+                       goc_lai, notes['goc_lai'],
+                       info, huong_dan])
 
     def _widget_simple(self):
         """Chi camera + bam line + toc do. Dung CHUNG vong dieu khien va CHUNG
