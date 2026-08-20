@@ -1513,11 +1513,13 @@ class LaneTuningUI(object):
                  layout=w.Layout(width='440px'),
                  readout_format='.2f', continuous_update=False)
 
+        # Dai noi rong de dua toc do. Tran an toan that su van la
+        # `control.v_max`, tu nang theo hai num nay.
         toc_do = w.FloatSlider(value=float(g('control.v_straight', 0.30)),
-                               min=0.05, max=0.50, step=0.01,
+                               min=0.05, max=0.85, step=0.01,
                                description='TOC DO thang', **L)
         toc_cua = w.FloatSlider(value=float(g('control.v_corner', 0.12)),
-                                min=0.05, max=0.40, step=0.01,
+                                min=0.05, max=0.65, step=0.01,
                                 description='TOC DO trong cua', **L)
         cua_som = w.FloatSlider(
             value=self._cfg_to_cua_som(g('control.curve_enter', 0.12)),
@@ -1537,13 +1539,22 @@ class LaneTuningUI(object):
 
         def _refresh():
             gp = self.engine.get_param
+            # Neu lai da cham tran, tang toc chi lam xe chay rong hon. Bao ngay
+            # o day thay vi de nguoi dung tu doc chu HARD-LIMIT tren panel.
+            tran = float(gp('control.driver.steering_output_max', 0.0))
+            canh = ''
+            if float(gp('control.v_straight', 0)) > 0.45 and tran < 0.75:
+                canh = ('<br><span style="color:#b00020">Ga cao ma TRAN SERVO '
+                        'moi %.2f - neu panel hien <b>HARD-LIMIT</b> thi lai da '
+                        'bao hoa, tang toc se chay rong ra ngoai cua.</span>'
+                        % tran)
             info.value = (
                 '<div style="margin-left:154px;font-size:11px;color:#555;'
                 'line-height:1.6">vao cua khi do cong &ge; <b>%.2f</b>'
                 ' &nbsp;|&nbsp; be lai som <b>%.2f</b>'
                 ' &nbsp;|&nbsp; tran servo <b>%.2f</b></div>'
                 % (gp('control.curve_enter', 0), gp('control.curve_feedforward', 0),
-                   gp('control.driver.steering_output_max', 0)))
+                   gp('control.driver.steering_output_max', 0)) + canh)
 
         def mk(fn):
             def _h(change):
