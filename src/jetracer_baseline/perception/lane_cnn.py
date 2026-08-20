@@ -79,7 +79,15 @@ class TensorRTEngine(object):
         try:
             import tensorrt as trt
             import pycuda.driver as cuda
-            import pycuda.autoinit      # noqa: F401  tao CUDA context
+            # CO Y KHONG dung `pycuda.autoinit`. autoinit tao context va day len
+            # NGAN XEP CUA DUNG THREAD DANG IMPORT. Detector duoc tao o thread
+            # chinh, con vong camera cua giao dien chay o THREAD NEN -> thread do
+            # khong co context nao, moi loi goi CUDA deu that bai.
+            # Trieu chung khong phai "bao loi ro rang" ma la: panel dung im o
+            # khung hinh dau tien, mask va cte khong doi du camera van cap nhat -
+            # vi `_loop` bat exception roi break, chi con anh cuoi cung tren man.
+            # Cach dung dung: giu primary context, push/pop quanh moi lan suy dien.
+            cuda.init()
         except ImportError as exc:
             raise ImportError(
                 '%s.\n'
@@ -94,7 +102,12 @@ class TensorRTEngine(object):
                 'Tren laptop: dat lane.cnn.backend=onnx de chay bang ONNXRuntime,\n'
                 'hoac lane.cnn.engine rong de chi dung hau xu ly.'
                 % exc)
+        import threading
         self._cuda = cuda
+        self._ctx = cuda.Device(0).retain_primary_context()
+        # TensorRT execution context KHONG an toan da luong. Giao dien co ca
+        # thread camera lan thread dieu khien -> phai khoa.
+        self._lock = threading.Lock()
 
         if not os.path.isfile(engine_path):
             raise IOError(
@@ -105,6 +118,13 @@ class TensorRTEngine(object):
                 % (engine_path, engine_path))
 
         logger = trt.Logger(trt.Logger.WARNING)
+        self._ctx.push()
+        try:
+            self._build(trt, cuda, engine_path, logger)
+        finally:
+            self._ctx.pop()
+
+    def _build(self, trt, cuda, engine_path, logger):
         with open(engine_path, 'rb') as fh:
             runtime = trt.Runtime(logger)
             self.engine = runtime.deserialize_cuda_engine(fh.read())
@@ -152,7 +172,18 @@ class TensorRTEngine(object):
         (self.in_idx if is_input else self.out_idx).append(idx)
 
     def infer(self, x):
-        """x: float32 (1,3,H,W) lien tuc -> dict {ten: mang}."""
+        """x: float32 (1,3,H,W) lien tuc -> dict {ten: mang}.
+
+        Push/pop context moi lan goi de chay duoc tu BAT KY thread nao.
+        """
+        with self._lock:
+            self._ctx.push()
+            try:
+                return self._infer_locked(x)
+            finally:
+                self._ctx.pop()
+
+    def _infer_locked(self, x):
         cuda = self._cuda
         i0 = self.in_idx[0]
         np.copyto(self.host[i0], x.ravel())
@@ -167,7 +198,10 @@ class TensorRTEngine(object):
         for i in self.out_idx:
             cuda.memcpy_dtoh_async(self.host[i], self.dev[i], self.stream)
         self.stream.synchronize()
-        return dict((self.names[i], self.host[i].reshape(self.shapes[i]))
+        # `.copy()`: host buffer la pagelocked va bi GHI DE o lan infer sau.
+        # Tra ve view thi ket qua co the doi duoi tay nguoi goi.
+        return dict((self.names[i],
+                     self.host[i].reshape(self.shapes[i]).copy())
                     for i in self.out_idx)
 
 

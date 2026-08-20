@@ -896,7 +896,16 @@ class LaneTuningUI(object):
             try:
                 result = self.engine.process(frame, dt, now=now)
             except Exception as exc:
+                # Bao THAT TO. Truoc day chi ghi mot dong log duoi cung: vong
+                # lap break, panel dung im o khung hinh cuoi, va nguoi dung
+                # tuong model "detect ra mot cuc do roi khong doi" chu khong
+                # biet la da co loi. Mat ca buoi de tim ra.
                 self._log('LOI XU LY -> DISARM: %s' % exc)
+                self.status.value = (
+                    '<div style="padding:8px;border-radius:4px;background:#b00020;'
+                    'color:#fff;font-weight:bold">DA DUNG VI LOI XU LY - '
+                    'panel ben duoi la KHUNG HINH CU, khong phai ket qua moi.'
+                    '<br>%s</div>' % exc)
                 self._disarm()
                 break
 
