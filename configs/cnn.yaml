@@ -24,3 +24,47 @@ lane:
     #        không build được vào phút chót.
     backend: trt
     engine: models/lane_tiny.engine
+
+# ---------------------------------------------------------------------------
+# GAIN ĐIỀU KHIỂN RIÊNG CHO CNN — mạnh hơn hẳn bản CV.
+#
+# Lý do được phép mạnh hơn: CV cổ điển hay bắt nhầm viền lane nên `curvature`
+# của nó nhiễu, đánh lái mạnh theo một tín hiệu nhiễu là xe lượn. Model cho
+# đường tâm liên tục và ổn định (test MAE 0.0318, found 1.000), nên
+# feed-forward theo độ cong đáng tin hơn nhiều lần.
+#
+# Đường CV KHÔNG bị ảnh hưởng — bỏ `--override configs/cnn.yaml` là về gain cũ.
+# ---------------------------------------------------------------------------
+control:
+  # Bám vạch về giữa chặt hơn: Kp cao hơn để sai lệch bị kéo về 0 nhanh,
+  # Kd nhích lên để bù, tránh zigzag trên đoạn thẳng.
+  pid:
+    kp: 1.10               # 0.60 -> 1.10
+    kd: 0.12               # 0.10 -> 0.12
+  # Ngắm xa hơn: đánh lái theo chỗ vạch SẼ tới, không theo chỗ xe ĐANG lệch.
+  steer_lookahead_weight: 0.70    # 0.50 -> 0.70
+
+  # --- CUA MẠNH ---
+  curve_enter: 0.12        # 0.22 -> 0.12  vào chế độ CUA sớm hơn nhiều
+  curve_exit: 0.08         # 0.14 -> 0.08
+  curve_feedforward: 1.80  # 0.90 -> 1.80  bẻ ngay khi THẤY cua
+  corner_steer_gain: 2.40  # 1.60 -> 2.40
+  slowdown: 0.20           # 0.12 -> 0.20  lệch nhiều thì bỏ ga mạnh hơn
+
+  # Mở hết trần MỀM. Trần thật còn lại là `driver.steering_output_max` bên dưới
+  # — đó là giới hạn CƠ KHÍ, chỉnh bằng núm "GOC LAI TOI DA" trên giao diện.
+  steer_max: 1.00          # 0.60 -> 1.00
+  corner_steer_max: 1.00   # 0.60 -> 1.00
+
+  driver:
+    # Đo được: với gain 0.65, lệnh lái tối đa tới servo chỉ là
+    #   steer 1.00 × 0.65 = 0.650
+    # nên kéo "GOC LAI TOI DA" quá 0.65 KHÔNG đổi gì cả — có một trần nữa nấp
+    # phía sau. Đặt 1.00 để `steering_output_max` thành giới hạn DUY NHẤT, và
+    # núm trên giao diện mới thật sự điều khiển được góc lái tối đa.
+    #
+    # KHÔNG làm xe nguy hiểm hơn ở mức hiện tại: ở `steering_output_max` 0.40,
+    # cả hai gain đều bị cắt về đúng 0.40. Nó chỉ mở phần trên của dải, và làm
+    # phản hồi ở khoảng giữa mạnh hơn — đúng thứ đang thiếu khi vào cua.
+    # Dấu ÂM giữ nguyên: servo lắp ngược, đổi dấu là xe lái ngược vào lane.
+    steering_gain: -1.00
