@@ -39,7 +39,7 @@ from jetracer_baseline.tuning_ui import launch_tuning_ui  # noqa: E402
 def launch(config_path='configs/default.yaml', source_kind='csi',
            video_path=None, driver_kind=None,
            save_path='configs/tuned.yaml', soft_start_s=1.0,
-           controller_index=0, data_root='data/driving'):
+           controller_index=0, data_root='data/driving', overrides=None):
     """Mo giao dien tune.
 
     KHONG co lenh nao xuong phan cung cho den khi bam nut CHAY. `driver_kind`
@@ -49,7 +49,7 @@ def launch(config_path='configs/default.yaml', source_kind='csi',
                             video_path=video_path, driver_kind=driver_kind,
                             save_path=save_path, soft_start_s=soft_start_s,
                             controller_index=controller_index,
-                            data_root=data_root)
+                            data_root=data_root, overrides=overrides)
 
 
 if __name__ == '__main__':

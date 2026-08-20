@@ -583,7 +583,7 @@ class LaneTuningUI(object):
                  save_path='configs/tuned.yaml', preview_width=760,
                  soft_start_s=1.0, record_dir='logs', record_fps=15.0,
                  controller_index=0, data_root='data/driving',
-                 control_hz=30.0):
+                 control_hz=30.0, overrides=None):
         try:
             import ipywidgets.widgets as widgets
         except ImportError:
@@ -603,7 +603,7 @@ class LaneTuningUI(object):
         self.save_path = save_path
         self.preview_width = preview_width
 
-        self.engine = LaneTuningEngine(config_path)
+        self.engine = LaneTuningEngine(config_path, overrides)
         self.engine.soft_start_s = float(soft_start_s)
         self.shaper = ControllerShaper(self.engine.cfg)
         self.controller = widgets.Controller(index=int(controller_index))
@@ -1503,7 +1503,8 @@ class LaneTuningUI(object):
 def launch_tuning_ui(config_path='configs/default.yaml', source_kind='csi',
                      video_path=None, driver_kind=None,
                      save_path='configs/tuned.yaml', soft_start_s=1.0,
-                     controller_index=0, data_root='data/driving'):
+                     controller_index=0, data_root='data/driving',
+                     overrides=None):
     """Mo giao dien. Khong co lenh nao xuong phan cung cho den khi bam CHAY.
 
     `driver_kind=None` -> tu chon: replay video/anh tong hop thi khong the dieu
@@ -1515,4 +1516,4 @@ def launch_tuning_ui(config_path='configs/default.yaml', source_kind='csi',
                         video_path=video_path, driver_kind=driver_kind,
                         save_path=save_path, soft_start_s=soft_start_s,
                         controller_index=controller_index,
-                        data_root=data_root).show()
+                        data_root=data_root, overrides=overrides).show()
