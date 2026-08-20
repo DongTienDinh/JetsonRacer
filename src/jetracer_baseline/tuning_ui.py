@@ -1551,6 +1551,20 @@ class LaneTuningUI(object):
             'control.curve_feedforward': round(0.60 + 1.60 * p, 3),
         }
 
+    # --- anh xa cho num PHANH TRUOC CUA -----------------------------------
+    # 0.00 = gan nhu khong phanh (giu toc do vao cua)
+    # 1.00 = phanh manh khi thay cua
+    @staticmethod
+    def _phanh_to_cfg(p):
+        return {
+            'control.curve_brake': round(0.70 * p, 3),   # theo do cong (don dau)
+            'control.slowdown': round(0.05 + 0.35 * p, 3),  # theo cte (phan ung)
+        }
+
+    @staticmethod
+    def _cfg_to_phanh(curve_brake):
+        return max(0.0, min(1.0, float(curve_brake) / 0.70))
+
     @staticmethod
     def _cfg_to_cua_som(curve_enter):
         return max(0.0, min(1.0, (0.30 - float(curve_enter)) / 0.24))
@@ -1574,6 +1588,10 @@ class LaneTuningUI(object):
         cua_som = w.FloatSlider(
             value=self._cfg_to_cua_som(g('control.curve_enter', 0.12)),
             min=0.0, max=1.0, step=0.05, description='CUA SOM', **L)
+        phanh = w.FloatSlider(
+            value=self._cfg_to_phanh(g('control.curve_brake', 0.30)),
+            min=0.0, max=1.0, step=0.05,
+            description='PHANH TRUOC CUA', **L)
         goc_lai = w.FloatSlider(
             value=float(g('control.driver.steering_output_max', 0.40)),
             min=0.30, max=1.00, step=0.05,
@@ -1601,9 +1619,12 @@ class LaneTuningUI(object):
             info.value = (
                 '<div style="margin-left:154px;font-size:11px;color:#555;'
                 'line-height:1.6">vao cua khi do cong &ge; <b>%.2f</b>'
-                ' &nbsp;|&nbsp; be lai som <b>%.2f</b>'
+                ' &nbsp;|&nbsp; be lai som <b>%.2f</b><br>'
+                'phanh theo do cong <b>%.2f</b>'
+                ' &nbsp;|&nbsp; phanh theo do lech <b>%.2f</b>'
                 ' &nbsp;|&nbsp; tran servo <b>%.2f</b></div>'
                 % (gp('control.curve_enter', 0), gp('control.curve_feedforward', 0),
+                   gp('control.curve_brake', 0), gp('control.slowdown', 0),
                    gp('control.driver.steering_output_max', 0)) + canh)
 
         def mk(fn):
@@ -1623,13 +1644,18 @@ class LaneTuningUI(object):
             for k, val in self._cua_som_to_cfg(v).items():
                 self.engine.set_param(k, val)
 
+        def set_phanh(v):
+            for k, val in self._phanh_to_cfg(v).items():
+                self.engine.set_param(k, val)
+
         def set_goc_lai(v):
             # Doi CA HAI chieu; doi mot ben thi xe chi cua duoc mot huong.
             self.engine.set_param('control.driver.steering_output_max', v)
             self.engine.set_param('control.driver.steering_output_min', -v)
 
         for sl, fn in ((toc_do, set_toc_do), (toc_cua, set_toc_cua),
-                       (cua_som, set_cua_som), (goc_lai, set_goc_lai)):
+                       (cua_som, set_cua_som), (phanh, set_phanh),
+                       (goc_lai, set_goc_lai)):
             sl.observe(mk(fn), names='value')
         _refresh()
 
@@ -1642,12 +1668,16 @@ class LaneTuningUI(object):
             '<b>CUA SOM</b> &mdash; xong vao cua som va manh den dau. <b>Tang</b> '
             'neu xe cua muon, cat vao phia TRONG cua. <b>Giam</b> neu doan thang '
             'xe luon zigzag.<br>'
+            '<b>PHANH TRUOC CUA</b> &mdash; bo ga ngay khi NHIN THAY cua, '
+            'truoc luc xe lech. <b>Tang</b> neu xe vao cua con nhanh qua. '
+            '<b>Giam</b> neu xe phanh oan o doan thang.<br>'
             '<b>GOC LAI TOI DA</b> &mdash; banh be duoc toi dau. <b>Tang</b> neu '
             'cua khong noi, chay thang ra ngoai lane.<br>'
             '<span style="color:#b00020"><b>CANH BAO:</b> GOC LAI TOI DA la gioi '
             'han CO KHI. KE BANH KHOI MAT DAT, tang tung nac 0.05, nghe tieng '
             'servo. Nghe ken thi lui lai mot nac.</span></div>')
-        return w.VBox([toc_do, toc_cua, cua_som, goc_lai, info, huong_dan])
+        return w.VBox([toc_do, toc_cua, cua_som, phanh, goc_lai, info,
+                       huong_dan])
 
     def _widget_simple(self):
         """Chi camera + bam line + toc do. Dung CHUNG vong dieu khien va CHUNG

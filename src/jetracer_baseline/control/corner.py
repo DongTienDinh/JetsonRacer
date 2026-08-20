@@ -66,6 +66,13 @@ class CornerController(object):
         # Giu them `corner_hold_s` giay lam hai thuy chu S thanh MOT khuc cua
         # lien, khong con khe ho de ga vot len.
         self.corner_hold_s = float(c('control.corner_hold_s', 0.0))
+        # PHANH DON DAU theo do cong NHIN THAY phia truoc. Khac han `slowdown`
+        # o duoi: `slowdown` chi bo ga khi xe DA lech (phan ung), con cai nay bo
+        # ga ngay khi con duong phia truoc bat dau cong - truoc luc xe lech.
+        # Do cong den tu da thuc fit tren toan tam nhin nen no bao truoc.
+        # Va no LIEN TUC, khong phai buoc nhay o nguong vao cua: xe ga nho dan
+        # khi cua den gan thay vi tut mot phat.
+        self.curve_brake = float(c('control.curve_brake', 0.0))
         self.slowdown = float(c('control.slowdown', 0.12))
         self.curve_feedforward = float(c('control.curve_feedforward', 0.9))
         self.corner_steer_gain = float(c('control.corner_steer_gain', 1.6))
@@ -128,7 +135,8 @@ class CornerController(object):
         # cua `corner_hold_s`: day la thu giu hai thuy chu S lien lai voi nhau.
         in_corner_speed = (mode == CORNER) or (self._hold > 0.0)
         target = self.v_corner if in_corner_speed else self.v_straight
-        target -= self.slowdown * abs(float(cte))
+        target -= self.curve_brake * abs(float(curvature))   # don dau
+        target -= self.slowdown * abs(float(cte))            # phan ung
         if not lane_found:
             # Mat vach thi khong duoc giu ga doan thang: xe dang lai theo gia
             # tri cu, cang nhanh cang xa vach.
