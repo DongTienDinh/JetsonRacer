@@ -60,6 +60,17 @@ LANE_PARAMS = [
     ('lane.smooth_alpha', 'EMA alpha', 0.10, 1.00, 0.05),
 ]
 
+# Khi chay CNN, gan het LANE_PARAMS o tren la nguong MAU -> vo tac dung, vi
+# model khong dung nguong mau. De nguyen chi lam nguoi tune keo nham roi tuong
+# minh dang chinh gi do. Danh sach nay la nhung thu THAT SU con tac dung.
+CNN_LANE_PARAMS = [
+    ('lane.cnn.lookahead', 'Diem ngam xa', 0.10, 1.00, 0.05),
+    ('lane.smooth_alpha', 'EMA alpha (do muot)', 0.10, 1.00, 0.05),
+    ('lane.cnn.min_bands', 'So dai toi thieu', 2, 6, 1),
+    ('lane.cnn.band_min_pixels', 'Pixel toi thieu / dai', 4, 60, 2),
+    ('lane.cnn.reg_disagree', 'Nguong bat dong y seg/reg', 0.10, 1.00, 0.05),
+]
+
 CONTROL_PARAMS = [
     ('control.v_straight', 'Ga doan THANG', 0.00, 0.60, 0.01),
     ('control.v_corner', 'Ga khi vao CUA', 0.00, 0.40, 0.01),
@@ -255,7 +266,15 @@ class LaneTuningEngine(object):
         _effective = ShadingCorrector.from_config(cfg)
         self.shading_coeff_r = list(_effective.coeff_r)
         self.shading_coeff_b = list(_effective.coeff_b)
-        self.lane = build_lane_detector(cfg)
+        prev = getattr(self, 'lane', None)
+        # Detector CNN giu mot engine TensorRT nang. Chi doi tham so, khong
+        # dung lai - xem CnnLaneDetector.update_config().
+        if (prev is not None and hasattr(prev, 'update_config')
+                and getattr(prev, 'engine_path', None)
+                == cfg.get('lane.cnn.engine', '')):
+            prev.update_config(cfg)
+        else:
+            self.lane = build_lane_detector(cfg)
         self.pid = PID(cfg.get('control.pid.kp', 0.6),
                        cfg.get('control.pid.ki', 0.0),
                        cfg.get('control.pid.kd', 0.1),
@@ -684,7 +703,10 @@ class LaneTuningUI(object):
             description='Sua mau (shading)')
 
         self._sliders = {}
-        self.lane_box = self._build_sliders(LANE_PARAMS)
+        # Chon dung bo slider theo nguon bam vach dang chay.
+        self.dung_cnn = type(self.engine.lane).__name__ == 'CnnLaneDetector'
+        self.lane_box = self._build_sliders(
+            CNN_LANE_PARAMS if self.dung_cnn else LANE_PARAMS)
         self.control_box = self._build_sliders(CONTROL_PARAMS)
         self.manual_box = self._build_sliders(MANUAL_PARAMS,
                                               on_change=self._apply_manual)
@@ -1457,7 +1479,15 @@ class LaneTuningUI(object):
                 'nao so voi nguoi, khong phai chay lai lan hai.'),
         ])
 
-        tabs = w.Tab(children=[self.lane_box, self.control_box, pad_box])
+        nguon = w.HTML(
+            '<div style="padding:6px 10px;margin-bottom:6px;border-radius:4px;'
+            'font-weight:bold;background:%s;color:#fff">NGUON BAM VACH: %s</div>'
+            % (('#1b7f3b', 'MODEL CNN (TensorRT) - models/lane_tiny.engine')
+               if self.dung_cnn else
+               ('#8a6d1f', 'CV CO DIEN (nguong mau) - KHONG dung model')))
+        lane_tab = w.VBox([nguon, self.lane_box])
+
+        tabs = w.Tab(children=[lane_tab, self.control_box, pad_box])
         tabs.set_title(0, 'Bam vach')
         tabs.set_title(1, 'Dieu khien')
         tabs.set_title(2, 'Tay cam + Data')

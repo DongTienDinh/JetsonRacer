@@ -204,17 +204,9 @@ class CnnLaneDetector(object):
         engine = c('lane.cnn.engine', 'models/lane_tiny.engine')
         # 'trt' = TensorRT (tren xe). 'onnx' = ONNXRuntime (kiem chung tren PC).
         self.backend = str(c('lane.cnn.backend', 'trt'))
-        self.alpha = float(c('lane.smooth_alpha', 0.6))
-        self.min_bands = int(c('lane.cnn.min_bands', MIN_BANDS))
-        self.band_min_pixels = int(c('lane.cnn.band_min_pixels', BAND_MIN_PIXELS))
         self.roi_top = float(c('lane.cnn.roi_top', ROI_TOP))
-        # Nguong bat dong y giua seg head va reg head. Vuot nguong = hai duong
-        # tinh doc lap trong model cho ket qua khac nhau -> khong tin duoc nua.
-        # Bao found=False de tang tren goi FSM ha ga / roi ve CV, thay vi lai
-        # theo mot con so ma chinh model cung khong chac.
-        self.reg_disagree = float(c('lane.cnn.reg_disagree', 0.35))
-        self.check_reg = bool(c('lane.cnn.check_reg', True))
-
+        self.engine_path = engine
+        self.update_config(cfg)
         self.M = _build_warp(PROC_W, PROC_H,
                              c('lane.cnn.warp_src', WARP_SRC),
                              float(c('lane.cnn.warp_dst_margin', WARP_DST_MARGIN)))
@@ -237,6 +229,27 @@ class CnnLaneDetector(object):
         self._reset_state()
         if self.engine is not None:
             self._warmup()
+
+    def update_config(self, cfg):
+        """Doc lai cac tham so RE tu config. KHONG dung toi engine TensorRT.
+
+        Ton tai vi giao dien tune goi `rebuild()` moi lan keo slider. Neu de no
+        dung lai ca detector thi moi lan keo se nap lai engine: treo giao dien
+        vai giay, va cap phat lai bo nho GPU ma khong giai phong cai cu.
+        Nhung tham so duoi day deu chi la so - doi tuc thi, khong ton gi.
+        """
+        c = cfg.get
+        self.alpha = float(c('lane.smooth_alpha', 0.6))
+        self.min_bands = int(c('lane.cnn.min_bands', MIN_BANDS))
+        self.band_min_pixels = int(c('lane.cnn.band_min_pixels', BAND_MIN_PIXELS))
+        # Diem ngam xa: truoc day la hang so nen slider khong co tac dung gi -
+        # nguoi tune keo mai ma khong hieu sao xe khong doi.
+        self.lookahead = float(c('lane.cnn.lookahead', LOOKAHEAD))
+        # Nguong bat dong y giua seg head va reg head. Vuot nguong = hai duong
+        # tinh doc lap trong model cho ket qua khac nhau -> khong tin duoc nua,
+        # bao found=False de FSM ha ga / roi ve CV.
+        self.reg_disagree = float(c('lane.cnn.reg_disagree', 0.35))
+        self.check_reg = bool(c('lane.cnn.check_reg', True))
 
     def _reset_state(self):
         self._cte = 0.0
@@ -376,7 +389,7 @@ class CnnLaneDetector(object):
                               cte_lookahead=self._look, n_bands=n_bands)
 
         half = PROC_W / 2.0
-        t_look = min(LOOKAHEAD, t_max)
+        t_look = min(self.lookahead, t_max)
         raw_cte = float(np.clip((co[2] - half) / half, -1.0, 1.0))
         raw_look = float(np.clip(
             (co[0] * t_look * t_look + co[1] * t_look + co[2] - half) / half,
