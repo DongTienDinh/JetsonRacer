@@ -71,6 +71,17 @@ CNN_LANE_PARAMS = [
     ('lane.cnn.reg_disagree', 'Nguong bat dong y seg/reg', 0.10, 1.00, 0.05),
 ]
 
+# Che do DON GIAN: chi nhung num anh huong truc tiep den "xe chay nhanh cham va
+# om cua the nao". Moi thu khac (nguong mau, tay cam, thu data, ghi video) bi an
+# di - khong xoa khoi code, chi khong hien.
+SIMPLE_PARAMS = [
+    ('control.v_straight', 'TOC DO doan thang', 0.00, 0.60, 0.01),
+    ('control.v_corner', 'TOC DO trong cua', 0.00, 0.40, 0.01),
+    ('control.v_max', 'TRAN ga (an toan)', 0.00, 0.80, 0.01),
+    ('control.curve_feedforward', 'Danh lai SOM theo cua', 0.0, 2.5, 0.05),
+    ('control.corner_steer_gain', 'Boi lai khi cua', 1.0, 3.0, 0.05),
+]
+
 CONTROL_PARAMS = [
     ('control.v_straight', 'Ga doan THANG', 0.00, 0.60, 0.01),
     ('control.v_corner', 'Ga khi vao CUA', 0.00, 0.40, 0.01),
@@ -602,7 +613,7 @@ class LaneTuningUI(object):
                  save_path='configs/tuned.yaml', preview_width=760,
                  soft_start_s=1.0, record_dir='logs', record_fps=15.0,
                  controller_index=0, data_root='data/driving',
-                 control_hz=30.0, overrides=None):
+                 control_hz=30.0, overrides=None, simple=False):
         try:
             import ipywidgets.widgets as widgets
         except ImportError:
@@ -615,6 +626,7 @@ class LaneTuningUI(object):
         import sys as _sys
         _sys.setswitchinterval(0.001)
 
+        self.simple = bool(simple)
         self.widgets = widgets
         self.source_kind = source_kind
         self.video_path = video_path
@@ -707,6 +719,7 @@ class LaneTuningUI(object):
         self.dung_cnn = type(self.engine.lane).__name__ == 'CnnLaneDetector'
         self.lane_box = self._build_sliders(
             CNN_LANE_PARAMS if self.dung_cnn else LANE_PARAMS)
+        self.simple_box = self._build_sliders(SIMPLE_PARAMS)
         self.control_box = self._build_sliders(CONTROL_PARAMS)
         self.manual_box = self._build_sliders(MANUAL_PARAMS,
                                               on_change=self._apply_manual)
@@ -1433,7 +1446,39 @@ class LaneTuningUI(object):
                   '--driver nvidia --override %s' % self.save_path)
 
     # -------------------------------------------------------------------- view
+    def _nguon_banner(self):
+        w = self.widgets
+        return w.HTML(
+            '<div style="padding:6px 10px;margin-bottom:6px;border-radius:4px;'
+            'font-weight:bold;background:%s;color:#fff">NGUON BAM VACH: %s</div>'
+            % (('#1b7f3b', 'MODEL CNN (TensorRT) - models/lane_tiny.engine')
+               if self.dung_cnn else
+               ('#8a6d1f', 'CV CO DIEN (nguong mau) - KHONG dung model')))
+
+    def _widget_simple(self):
+        """Chi camera + bam line + toc do. Dung CHUNG vong dieu khien va CHUNG
+        co che an toan voi giao dien day du - o day chi bay it widget hon."""
+        w = self.widgets
+        that = self.driver_kind != 'dryrun'
+        canh_bao = w.HTML(
+            '<div style="padding:8px 10px;border-radius:4px;background:%s;'
+            'color:#fff;font-weight:bold">%s</div>'
+            % (('#b00020', 'XE SE CHAY THAT khi bam CHAY. Lan dau: KE BANH '
+                           'KHOI MAT DAT.') if that else
+               ('#0a7d3b', 'DRYRUN - banh KHONG quay du bam CHAY.')))
+        return w.VBox([
+            self._nguon_banner(),
+            canh_bao,
+            w.HBox([self.btn_open, self.btn_run, self.btn_halt, self.btn_stop]),
+            w.HBox([self.preview,
+                    w.VBox([w.HTML('<b>TOC DO &amp; DO CUA</b>'),
+                            self.simple_box, self.btn_close])]),
+            self.status, self.metrics, self.output,
+        ])
+
     def widget(self):
+        if self.simple:
+            return self._widget_simple()
         w = self.widgets
         if self.driver_kind == 'dryrun':
             mode = ('<b style="color:#0a7">DANG O CHE DO DRYRUN</b> - banh se '
@@ -1479,13 +1524,7 @@ class LaneTuningUI(object):
                 'nao so voi nguoi, khong phai chay lai lan hai.'),
         ])
 
-        nguon = w.HTML(
-            '<div style="padding:6px 10px;margin-bottom:6px;border-radius:4px;'
-            'font-weight:bold;background:%s;color:#fff">NGUON BAM VACH: %s</div>'
-            % (('#1b7f3b', 'MODEL CNN (TensorRT) - models/lane_tiny.engine')
-               if self.dung_cnn else
-               ('#8a6d1f', 'CV CO DIEN (nguong mau) - KHONG dung model')))
-        lane_tab = w.VBox([nguon, self.lane_box])
+        lane_tab = w.VBox([self._nguon_banner(), self.lane_box])
 
         tabs = w.Tab(children=[lane_tab, self.control_box, pad_box])
         tabs.set_title(0, 'Bam vach')
@@ -1534,7 +1573,7 @@ def launch_tuning_ui(config_path='configs/default.yaml', source_kind='csi',
                      video_path=None, driver_kind=None,
                      save_path='configs/tuned.yaml', soft_start_s=1.0,
                      controller_index=0, data_root='data/driving',
-                     overrides=None):
+                     overrides=None, simple=False):
     """Mo giao dien. Khong co lenh nao xuong phan cung cho den khi bam CHAY.
 
     `driver_kind=None` -> tu chon: replay video/anh tong hop thi khong the dieu
@@ -1546,4 +1585,5 @@ def launch_tuning_ui(config_path='configs/default.yaml', source_kind='csi',
                         video_path=video_path, driver_kind=driver_kind,
                         save_path=save_path, soft_start_s=soft_start_s,
                         controller_index=controller_index,
-                        data_root=data_root, overrides=overrides).show()
+                        data_root=data_root, overrides=overrides,
+                        simple=simple).show()
