@@ -29,7 +29,12 @@ class StoplineDetector(object):
         self.min_rows = int(cfg.get('stopline.min_rows', 3))
 
     def process(self, frame_bgr):
-        small = cv2.resize(frame_bgr, (self.pw, self.ph))
+        # Runner da dua frame ve proc_width/proc_height. Khong resize/copy lai
+        # 30 lan/giay neu kich thuoc da dung; van giu fallback cho API doc lap.
+        if frame_bgr.shape[1] == self.pw and frame_bgr.shape[0] == self.ph:
+            small = frame_bgr
+        else:
+            small = cv2.resize(frame_bgr, (self.pw, self.ph))
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 

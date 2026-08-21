@@ -80,14 +80,32 @@ jupyter lab --ip=0.0.0.0 --no-browser
 Mở [tune_lane.ipynb](tune_lane.ipynb) từ máy khác và Run All. Giao diện mở lên ở trạng
 thái **dừng** — không lệnh nào xuống phần cứng cho đến khi bấm **CHẠY - BÁM LINE**; ga
 tăng dần trong 1 giây đầu. Chỉnh xong bấm **LƯU CONFIG** → ghi `configs/tuned.yaml`,
-rồi chạy lượt chính thức có ghi log:
+rồi chạy lượt chính thức có ghi log. Trong giao diện, mỗi lần bấm **CHẠY** hoặc
+**LÁI TAY** sẽ tự tạo một CSV riêng; **DỪNG**, dừng khẩn cấp, lỗi camera/model/driver
+và đóng UI đều ghi dòng kết rồi flush/đóng file:
 
 ```bash
 python3 -m src.jetracer_baseline.cli run --task speed --driver nvidia --override configs/tuned.yaml --record
 ```
 
-FPS hiển thị trong giao diện là `FPS(UI)`, **không** phải FPS thi đấu — vòng đó còn vẽ
-panel và mã hoá JPEG. Con số đối chiếu ngưỡng 20 chỉ lấy từ một lượt chạy qua CLI.
+`FPS(XỬ LÝ)` trong giao diện đếm các `frame_id` mới đã hoàn tất camera → perception
+→ sinh lệnh. Panel/JPEG chạy worker latest-only 5 Hz và không nằm trong phép đo.
+Nếu AUTO không có completion mới trong 0,25 giây, xe tự cắt motor và chốt log với
+`event=camera_stall`; chỉnh ngưỡng bằng `tuning.pipeline_stall_s` khi thật sự cần.
+Log tune dùng để tìm bottleneck; số nghiệm thu chính thức vẫn lấy từ một lượt CLI
+trên Jetson thật (không dùng replay không realtime).
+
+Đo an toàn trên CSI thật nhưng không quay bánh, chạy 3 lượt 60 giây:
+
+```bash
+python3 -m src.jetracer_baseline.cli run --task speed --driver dryrun \
+  --override configs/cnn.yaml --max-seconds 60
+python3 tools/analyze_log.py "logs/run_speed_*.csv"
+```
+
+Mục tiêu có dự phòng: `FPS mean >= 24`, `FPS p05 >= 20`, latency `p95 <= 25 ms`.
+Mốc chấm là 20 FPS, nhưng cấu hình chỉ vừa 20 sẽ dễ tụt dưới ngưỡng khi nóng máy
+hoặc đồng thời ghi video.
 
 Hiệu chuẩn lens shading màu (**làm trước khi tune bất kỳ ngưỡng màu nào**) —
 camera CSI của xe đỏ gấp ~1.6 lần ở góc ảnh so với tâm ảnh, nên một ngưỡng HSV

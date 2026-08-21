@@ -38,10 +38,12 @@ from jetracer_baseline.perception.lane import LaneDetector       # noqa: E402
 from jetracer_baseline.perception.shading import (               # noqa: E402
     ShadingCorrector, fit_coefficients, measure_ratio_profile)
 from jetracer_baseline.perception.signs import SignTracker       # noqa: E402
+from jetracer_baseline.perception.stopline import StoplineDetector  # noqa: E402
 from jetracer_baseline.pipeline import Runner                    # noqa: E402
 from jetracer_baseline.tuning_ui import (                        # noqa: E402
     MANUAL_PARAMS, MODE_AUTO, MODE_MANUAL, MODE_STOP, ControllerShaper,
-    LaneTuningEngine, RollingStats, _dict_diff)
+    LaneTuningEngine, LaneTuningUI, ProcessingFpsMeter, RollingStats,
+    _dict_diff)
 from jetracer_baseline.manual_collection import (                # noqa: E402
     CSV_FIELDS, DatasetSessionWriter, ManualDriveCollector, apply_deadzone,
     shape_steering, shape_throttle, slew_towards)
@@ -893,6 +895,332 @@ def test_tuning_engine_runs_without_ipywidgets():
     assert engine.encode_jpeg(panel)
 
 
+def test_processing_fps_meter_uses_completion_cadence():
+    meter = ProcessingFpsMeter(window=60)
+    for completed in (10.00, 10.04, 10.08):
+        meter.tick(completed)
+    assert abs(meter.fps - 25.0) < 1e-9
+    assert abs(meter.mean_fps - 25.0) < 1e-9
+    assert meter.current_fps(now=10.50, stale_after=0.25) == 0.0
+    meter.reset()
+    assert meter.frames == 0 and meter.fps == 0.0
+
+
+def test_stopline_skips_resize_when_pipeline_frame_already_matches():
+    detector = StoplineDetector(_cfg())
+    frame = np.zeros((detector.ph, detector.pw, 3), np.uint8)
+    original_resize = cv2.resize
+
+    def forbidden_resize(*_args, **_kwargs):
+        raise AssertionError('frame dung proc_size ma van resize lai')
+
+    cv2.resize = forbidden_resize
+    try:
+        result = detector.process(frame)
+    finally:
+        cv2.resize = original_resize
+    assert not result.found
+
+
+def test_tuning_run_log_is_automatic_terminal_and_collision_safe(tmpdir=None):
+    """Moi luot tao file rieng, co start/stop va t_rel thuc su tang."""
+    workdir = tmpdir or tempfile.mkdtemp(prefix='tune_auto_log_')
+
+    class Button(object):
+        description = ''
+        button_style = ''
+
+    class Lane(object):
+        cte = 0.1
+        cte_lookahead = 0.2
+        curvature = 0.01
+        found = True
+        n_bands = 5
+
+    ui = LaneTuningUI.__new__(LaneTuningUI)
+    ui.log_dir = workdir
+    ui._logger = None
+    ui._logger_lock = threading.Lock()
+    ui._lifecycle_lock = threading.RLock()
+    ui._state_lock = threading.Lock()
+    ui._run_mode = MODE_STOP
+    ui._run_started_mono = None
+    ui._run_meter = ProcessingFpsMeter(60)
+    ui._fps_stale_after = 0.25
+    ui._last_run_summary = None
+    ui.btn_log = Button()
+    ui._armed = True
+    ui._man_steer = -0.25
+    ui._man_throttle = 0.15
+    ui._log = lambda _message: None
+
+    result = {
+        'lane': Lane(), 'mode': 'THANG', 'steer': 0.1, 'throttle': 0.2,
+        'servo_clipped': False,
+    }
+    paths = []
+    try:
+        for _ in range(2):
+            assert ui._start_run_log(MODE_AUTO)
+            # Frame bat dau truoc luc bam CHAY nhung hoan tat sau do khong
+            # duoc lot vao session moi/tao t_rel am.
+            ui._write_log_row(
+                result, 6, time.time(), time.monotonic(), 4.0,
+                pipeline_started_mono=ui._run_started_mono - 0.01)
+            assert ui._run_meter.frames == 0
+            time.sleep(0.01)
+            ui._write_log_row(
+                result, 7, time.time(), time.monotonic(), 4.0,
+                pipeline_started_mono=ui._run_started_mono + 0.001)
+            time.sleep(0.01)
+            summary = ui._finish_run_log('stop')
+            paths.append(summary['path'])
+            with io.open(summary['path'], encoding='utf-8') as fh:
+                rows = list(csv.DictReader(fh))
+            assert rows[0]['event'] == 'start'
+            assert rows[-1]['event'] == 'stop'
+            assert rows[-1]['state'] == 'FINISHED'
+            assert float(rows[-1]['t_rel']) > 0.0
+        assert paths[0] != paths[1]
+        assert all(os.path.isfile(p) for p in paths)
+
+        assert ui._start_run_log(MODE_MANUAL)
+        ui._write_log_row(
+            result, 8, time.time(), time.monotonic(), 4.0,
+            pipeline_started_mono=ui._run_started_mono + 0.001)
+        manual_summary = ui._finish_run_log('stop')
+        with io.open(manual_summary['path'], encoding='utf-8') as fh:
+            manual_rows = list(csv.DictReader(fh))
+        assert manual_rows[1]['decision'] == 'MANUAL'
+        assert manual_rows[1]['control_output'] == (
+            'steer=-0.250;throttle=0.150')
+        assert manual_rows[1]['throttle'] == '0.150'
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def test_disarm_cannot_be_followed_by_stale_driver_set():
+    """DUNG phai la action driver cuoi cung du control dang gui lenh."""
+    entered = threading.Event()
+    release_set = threading.Event()
+    disarmed = threading.Event()
+    actions = []
+
+    class Driver(object):
+        def set(self, _steer, _throttle):
+            entered.set()
+            release_set.wait(1.0)
+            actions.append('set')
+
+        def stop(self):
+            actions.append('stop')
+
+    class Engine(object):
+        def stop_run(self):
+            pass
+
+    class Shaper(object):
+        def reset(self):
+            pass
+
+    class Button(object):
+        description = ''
+
+    ui = LaneTuningUI.__new__(LaneTuningUI)
+    ui._lifecycle_lock = threading.RLock()
+    ui._engine_lock = threading.RLock()
+    ui._driver_lock = threading.Lock()
+    ui._state_lock = threading.Lock()
+    ui._control_stop = threading.Event()
+    ui.control_period = 0.01
+    ui.mode = MODE_AUTO
+    ui._armed = True
+    ui._driver = Driver()
+    ui._cv_steer = 0.2
+    ui._cv_throttle = 0.3
+    ui._cv_started_mono = time.monotonic()
+    ui._run_started_mono = ui._cv_started_mono - 1.0
+    ui._fps_stale_after = 0.25
+    ui._camera_stopping = threading.Event()
+    ui._stop_event = threading.Event()
+    ui.engine = Engine()
+    ui.shaper = Shaper()
+    ui.btn_manual = Button()
+    ui._sync_driver_limits = lambda: None
+    ui._finish_run_log = lambda _reason: None
+    ui._log = lambda _message: None
+
+    control = threading.Thread(target=ui._control_loop)
+    control.start()
+    assert entered.wait(1.0)
+
+    def stop_run():
+        ui._disarm('stop')
+        disarmed.set()
+
+    stopper = threading.Thread(target=stop_run)
+    stopper.start()
+    time.sleep(0.02)
+    assert not disarmed.is_set(), 'DUNG chen vao giua driver.set'
+    ui._control_stop.set()
+    release_set.set()
+    control.join(1.0)
+    stopper.join(1.0)
+
+    assert disarmed.is_set()
+    assert actions == ['set', 'stop'], actions
+    assert ui._armed is False and ui.mode == MODE_STOP
+
+
+def test_auto_control_rejects_command_from_pre_run_frame():
+    commands = []
+
+    class Driver(object):
+        def set(self, steer, throttle):
+            commands.append((steer, throttle))
+            ui._control_stop.set()
+
+    ui = LaneTuningUI.__new__(LaneTuningUI)
+    ui._lifecycle_lock = threading.RLock()
+    ui._driver_lock = threading.Lock()
+    ui._state_lock = threading.Lock()
+    ui._control_stop = threading.Event()
+    ui.control_period = 0.001
+    ui.mode = MODE_AUTO
+    ui._armed = True
+    ui._driver = Driver()
+    ui._cv_steer = 0.8
+    ui._cv_throttle = 0.9
+    started = time.monotonic()
+    ui._run_started_mono = started
+    ui._cv_started_mono = started - 0.01
+    ui._fps_stale_after = 0.25
+    ui._camera_stopping = threading.Event()
+    ui._stop_event = threading.Event()
+    ui._sync_driver_limits = lambda: None
+    ui._log = lambda _message: None
+
+    ui._control_loop()
+    assert commands == [(0.0, 0.0)], commands
+
+
+def test_auto_control_disarms_when_pipeline_command_is_stale():
+    actions = []
+    reasons = []
+
+    class Driver(object):
+        def set(self, _steer, _throttle):
+            actions.append('set')
+
+        def stop(self):
+            actions.append('stop')
+            ui._control_stop.set()
+
+    class Engine(object):
+        def stop_run(self):
+            pass
+
+    class Shaper(object):
+        def reset(self):
+            pass
+
+    class Button(object):
+        description = ''
+
+    ui = LaneTuningUI.__new__(LaneTuningUI)
+    ui._lifecycle_lock = threading.RLock()
+    ui._engine_lock = threading.RLock()
+    ui._driver_lock = threading.Lock()
+    ui._state_lock = threading.Lock()
+    ui._control_stop = threading.Event()
+    ui._camera_stopping = threading.Event()
+    ui._stop_event = threading.Event()
+    ui.control_period = 0.001
+    ui.mode = MODE_AUTO
+    ui._armed = True
+    ui._driver = Driver()
+    now = time.monotonic()
+    ui._run_started_mono = now - 2.0
+    ui._cv_started_mono = now - 1.0
+    ui._fps_stale_after = 0.25
+    ui._cv_steer = 0.8
+    ui._cv_throttle = 0.9
+    ui.engine = Engine()
+    ui.shaper = Shaper()
+    ui.btn_manual = Button()
+    ui._sync_driver_limits = lambda: None
+    ui._finish_run_log = lambda reason: reasons.append(reason)
+    ui._log = lambda _message: None
+    ui._set_status = lambda _message: None
+    ui._metrics_html = lambda: ''
+    ui.metrics = type('Metrics', (object,), {'value': ''})()
+    ui._fps = 30.0
+
+    ui._control_loop()
+    assert actions == ['stop'], actions
+    assert reasons == ['camera_stall']
+    assert ui._camera_stopping.is_set() and ui._stop_event.is_set()
+    assert not ui._armed and ui.mode == MODE_STOP
+
+
+def test_ui_pipeline_exception_always_runs_finalizer():
+    reasons = []
+    ui = LaneTuningUI.__new__(LaneTuningUI)
+    ui.status = type('Status', (object,), {'value': ''})()
+    ui._log = lambda _message: None
+
+    def fail(_grabber):
+        raise RuntimeError('grabber copy failed')
+
+    ui._process_loop = fail
+    ui._finalize_camera_loop = (
+        lambda _grabber, reason: reasons.append(reason))
+    ui._loop(object())
+    assert reasons == ['pipeline_error']
+
+
+def test_log_summary_uses_full_run_throughput_not_mean_rolling_fps():
+    from tools.analyze_log import summarise
+    rows = []
+    for i, t_rel in enumerate((0.00, 0.05, 0.10, 0.15)):
+        rows.append({
+            't_rel': str(t_rel), 'frame_id': str(i), 'fps': '30.0',
+            'latency_ms': '4.0', 'sign_latency_ms': '', 'cte': '0.1',
+            'state': 'RUNNING', 'event': '',
+        })
+    # FINISHED cua FSM van la mot frame pipeline that, khac marker dong file.
+    rows.append({
+        't_rel': '0.20', 'frame_id': '4', 'fps': '30.0',
+        'latency_ms': '4.0', 'sign_latency_ms': '', 'cte': '0.1',
+        'state': 'FINISHED', 'event': '',
+        'control_output': 'steer=0;throttle=0',
+        'lane_found': '1', 'n_bands': '5',
+    })
+    # Cached frame cu khong duoc tang frame count lan hai.
+    rows.append(dict(rows[-1]))
+    rows.append({
+        't_rel': '0.25', 'frame_id': '5', 'fps': '30.0',
+        'latency_ms': '0.0', 'sign_latency_ms': '', 'cte': '0.0',
+        'state': 'FINISHED', 'event': 'stop', 'control_output': '',
+        'lane_found': '', 'n_bands': '',
+    })
+    summary = summarise(rows)
+    assert summary['frames'] == 5
+    assert abs(summary['fps_mean'] - 20.0) < 1e-9
+
+
+def test_log_analyzer_rejects_sidecar_schema(tmpdir=None):
+    from tools.analyze_log import read_log
+    workdir = tmpdir or tempfile.mkdtemp(prefix='analyze_sidecar_')
+    try:
+        path = os.path.join(workdir, 'run_speed_x.sidecar.csv')
+        with io.open(path, 'w', encoding='utf-8') as fh:
+            fh.write(u'timestamp,camera_backend\n1.0,csi\n')
+        assert read_log(path) is None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def test_tuning_engine_applies_slider_changes_live():
     """Doi tham so phai co tac dung ngay, khong can tao lai engine.
 
@@ -1394,6 +1722,28 @@ def test_sign_tracker_needs_votes():
     assert out is not None and out[0] == 'turn_left'
 
 
+def test_runner_does_not_vote_same_cached_detection_more_than_once():
+    """Lane 30 Hz khong duoc bien mot detection 10 Hz thanh ba vote gia."""
+    runner = Runner.__new__(Runner)
+    runner.tracker = SignTracker(_cfg(signs__vote_k=3, signs__vote_n=5))
+    runner._last_detection_seq = None
+    runner._stable_sign = None
+
+    class D(object):
+        label = 'turn_left'
+        confidence = 0.9
+        area_ratio = 0.05
+
+    detection = [D()]
+    assert runner._update_sign_tracker(detection, 1, time.time()) is None
+    assert runner._update_sign_tracker(detection, 1, time.time()) is None
+    assert runner._update_sign_tracker(detection, 1, time.time()) is None
+    assert len(runner.tracker._history) == 1
+    assert runner._update_sign_tracker(detection, 2, time.time()) is None
+    stable = runner._update_sign_tracker(detection, 3, time.time())
+    assert stable is not None and stable[0] == 'turn_left'
+
+
 def test_green_light_needs_higher_confidence_than_red():
     """Bat doi xung an toan: bao nham xanh = vuot den do = HUY LUOT."""
     cfg = _cfg()
@@ -1473,6 +1823,7 @@ def test_full_pipeline_writes_valid_log(tmpdir=None):
     runner = Runner(cfg, task='speed', driver_kind='dryrun',
                     source=SyntheticSource(n_frames=60), log_dir=log_dir,
                     verbose=False, sync=True, realtime=False)
+    assert runner.worker is None, 'Speed Track khong duoc chay detector bien ngam'
     summary = runner.run(max_frames=60)
 
     assert summary['frames'] == 60
@@ -1483,6 +1834,56 @@ def test_full_pipeline_writes_valid_log(tmpdir=None):
     # Moi dong du so cot -> parse duoc bang pandas/csv khi viet paper
     for line in lines[1:]:
         assert len(line.split(',')) == len(FIELDS)
+
+
+def test_runner_constructor_failure_releases_camera():
+    from jetracer_baseline import pipeline as pipeline_mod
+
+    class Source(object):
+        def __init__(self):
+            self.released = False
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            self.released = True
+
+    source = Source()
+    original = pipeline_mod.build_driver
+
+    def fail_driver(_kind, _cfg_value):
+        raise RuntimeError('driver init failed')
+
+    pipeline_mod.build_driver = fail_driver
+    try:
+        try:
+            Runner(_cfg(), task='speed', driver_kind='dryrun', source=source,
+                   verbose=False, sync=True)
+            raise AssertionError('Runner phai bao loi build_driver')
+        except RuntimeError as exc:
+            assert 'driver init failed' in str(exc)
+    finally:
+        pipeline_mod.build_driver = original
+    assert source.released, 'constructor loi nhung camera/source chua release'
+
+
+def test_live_runner_does_not_loop_forever_on_cached_eof_frame(tmpdir=None):
+    workdir = tmpdir or tempfile.mkdtemp(prefix='runner_eof_')
+    try:
+        runner = Runner(
+            _cfg(), task='speed', driver_kind='dryrun',
+            source=SyntheticSource(n_frames=5), log_dir=workdir,
+            verbose=False, sync=False, realtime=False)
+        t0 = time.monotonic()
+        summary = runner.run(max_seconds=2.0)
+        assert time.monotonic() - t0 < 1.0
+        with io.open(summary['log'], encoding='utf-8') as fh:
+            rows = list(csv.DictReader(fh))
+        assert rows[-1]['event'] == 'eof'
+        assert rows[-1]['state'] == 'FINISHED'
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 if __name__ == '__main__':

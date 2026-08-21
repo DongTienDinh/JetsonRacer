@@ -46,7 +46,11 @@ class _DetectWorker(object):
         self.period = 1.0 / max(1.0, float(hz))
         self._lock = threading.Lock()
         self._result = []
+        self._result_seq = 0
         self._fps = 0.0
+        self._mean_interval = None
+        self._last_completed = None
+        self._last_frame_id = None
         self._stopped = False
         self._thread = threading.Thread(target=self._loop)
         self._thread.daemon = True
@@ -56,30 +60,66 @@ class _DetectWorker(object):
         return self
 
     def _loop(self):
-        ema = None
+        intervals = []
         while not self._stopped:
-            t0 = time.time()
+            t0 = time.monotonic()
             # peek: khong duoc nhay frame cua vong chinh o che do replay
-            frame, _ = self.grabber.peek()
-            if frame is not None:
+            frame, frame_id = self.grabber.peek()
+            completed = None
+            if frame is not None and frame_id != self._last_frame_id:
+                detector_ok = True
                 try:
                     dets = self.detector.detect(frame)
                 except Exception:
                     dets = []
+                    detector_ok = False
                 with self._lock:
                     self._result = dets
-            dt = time.time() - t0
-            inst = 1.0 / dt if dt > 0 else 0.0
-            ema = inst if ema is None else (0.2 * inst + 0.8 * ema)
-            with self._lock:
-                self._fps = ema
+                    # Moi lan inference hoan tat/that bai la mot quan sat moi.
+                    # Runner chi duoc vote bien bao mot lan cho moi sequence.
+                    self._result_seq += 1
+                self._last_frame_id = frame_id
+                if not detector_ok:
+                    with self._lock:
+                        self._fps = 0.0
+                    dt = time.monotonic() - t0
+                    sleep = self.period - dt
+                    if sleep > 0:
+                        time.sleep(sleep)
+                    continue
+                completed = time.monotonic()
+                if self._last_completed is not None:
+                    dt_complete = completed - self._last_completed
+                    if dt_complete > 0.0:
+                        intervals.append(dt_complete)
+                        if len(intervals) > 30:
+                            intervals.pop(0)
+                self._last_completed = completed
+                if intervals:
+                    with self._lock:
+                        self._mean_interval = sum(intervals) / len(intervals)
+                        self._fps = 1.0 / self._mean_interval
+            dt = time.monotonic() - t0
             sleep = self.period - dt
             if sleep > 0:
                 time.sleep(sleep)
 
     def get(self):
         with self._lock:
-            return list(self._result), self._fps
+            fps = self._fps
+            result = list(self._result)
+            result_seq = self._result_seq
+            mean_interval = self._mean_interval
+        # Camera/detector dung thi khong duoc giu mai mot FPS dep tu qua khu.
+        # Detector cham hon period van la detector khoe: timeout phai co gian
+        # theo cadence hoan tat da do, khong ep cung 2.5/detect_hz.
+        stale_after = max(
+            2.5 * self.period,
+            2.5 * mean_interval if mean_interval is not None else 0.0)
+        if (self._last_completed is None or
+                time.monotonic() - self._last_completed > stale_after):
+            fps = 0.0
+        return result, fps, result_seq
 
     def stop(self):
         self._stopped = True
@@ -136,6 +176,13 @@ class Runner(object):
         self.cfg = cfg
         self.task = task
         self.verbose = verbose
+        # Gan truoc de close() co the don dep an toan neu constructor loi giua
+        # chung (camera/driver/model/log khong duoc bi giu den lan chay sau).
+        self.grabber = None
+        self.worker = None
+        self.driver = None
+        self.logger = None
+        self.recorder = None
         # Cung mot run_name cho ca CSV va video -> ghep duoc theo ten file.
         self.run_name = time.strftime('%Y%m%d_%H%M%S')
         # sync=True  : replay offline, xu ly du moi frame, tat dinh
@@ -145,71 +192,105 @@ class Runner(object):
         self.realtime = realtime
 
         grabber_cls = SyncGrabber if sync else LatestFrameGrabber
-        self.grabber = grabber_cls(source).start()
+        try:
+            self.grabber = grabber_cls(source).start()
+        except Exception:
+            try:
+                source.release()
+            except Exception:
+                pass
+            raise
         startup_error = getattr(self.grabber, 'error', None)
         if startup_error is not None:
             self.grabber.stop()
             raise RuntimeError('Camera/source khong khoi dong duoc: %s' %
                                startup_error)
-        # Sua lens shading mau TRUOC moi khau nhan dien. Camera CSI cua xe do
-        # gap ~1.6 lan o goc anh so voi tam (do tren raw_camera.avi); mot nguong
-        # mau duy nhat khong the dung cho ca khung hinh neu khong sua truoc.
-        # Nguon da tu sua mau (camera.shading.apply_at = source) thi o day
-        # KHONG duoc sua nua - sua hai lan se day gain len binh phuong, anh xam
-        # thanh xanh la va moi nguong mau da tune deu sai.
-        if shading_applied_at_source(cfg):
-            self.shading = ShadingCorrector.disabled()
-        else:
-            self.shading = ShadingCorrector.from_config(cfg)
-        self.proc_size = (int(cfg.get('pipeline.proc_width', 320)),
-                          int(cfg.get('pipeline.proc_height', 240)))
-        self.lane = build_lane_detector(cfg)
-        self.stopline = StoplineDetector(cfg)
-        self.tracker = SignTracker(cfg)
-        self.detector = build_detector(cfg, script=detector_script)
-        self.worker = _DetectWorker(
-            self.detector, self.grabber, cfg.get('pipeline.detect_hz', 10),
-        ).start()
+        try:
+            # Sua lens shading mau TRUOC moi khau nhan dien. Camera CSI cua xe
+            # do gap ~1.6 lan o goc anh so voi tam; nguon da tu sua mau thi
+            # khong duoc sua lan hai trong pipeline.
+            if shading_applied_at_source(cfg):
+                self.shading = ShadingCorrector.disabled()
+            else:
+                self.shading = ShadingCorrector.from_config(cfg)
+            self.proc_size = (int(cfg.get('pipeline.proc_width', 320)),
+                              int(cfg.get('pipeline.proc_height', 240)))
+            self.lane = build_lane_detector(cfg)
+            self.stopline = StoplineDetector(cfg)
+            self.tracker = (SignTracker(cfg)
+                            if self.task == 'smartcity' else None)
+            # Speed Track khong dung bien bao. Smart City tao worker o day
+            # nhung chi start sau khi TAT CA resource khac da khoi tao thanh cong.
+            self.detector = None
+            if self.task == 'smartcity':
+                self.detector = build_detector(cfg, script=detector_script)
+                self.worker = _DetectWorker(
+                    self.detector, self.grabber,
+                    cfg.get('pipeline.detect_hz', 10))
+        except Exception:
+            self.close()
+            raise
 
-        self.pid = PID(
-            cfg.get('control.pid.kp', 0.6),
-            cfg.get('control.pid.ki', 0.0),
-            cfg.get('control.pid.kd', 0.1),
-            out_limit=cfg.get('control.pid.out_limit', 1.0),
-        )
-        # Cung mot bo dieu khien voi giao dien tune -> tune xong chay that
-        # khong bi lech hanh vi.
-        self.corner = CornerController(cfg)
-        self.driver = build_driver(driver_kind, cfg)
-        self.fsm = fsm_mod.DecisionFSM(cfg, task=task)
-        self.motion = MotionEstimator(
-            threshold=float(cfg.get('fsm.motion_threshold', 2.0)),
-        )
-        self.fps_meter = FpsMeter(cfg.get('pipeline.fps_window', 60))
+        try:
+            self.pid = PID(
+                cfg.get('control.pid.kp', 0.6),
+                cfg.get('control.pid.ki', 0.0),
+                cfg.get('control.pid.kd', 0.1),
+                out_limit=cfg.get('control.pid.out_limit', 1.0),
+            )
+            # Cung mot bo dieu khien voi giao dien tune -> tune xong chay that
+            # khong bi lech hanh vi.
+            self.corner = CornerController(cfg)
+            self.driver = build_driver(driver_kind, cfg)
+            self.fsm = fsm_mod.DecisionFSM(cfg, task=task)
+            self.motion = MotionEstimator(
+                threshold=float(cfg.get('fsm.motion_threshold', 2.0)),
+            )
+            self.fps_meter = FpsMeter(cfg.get('pipeline.fps_window', 60))
 
-        self.logger = RunLogger(
-            log_dir or cfg.get('logging.dir', 'logs'),
-            task,
-            run_name=self.run_name,
-            flush_every=cfg.get('logging.flush_every', 30),
-        )
+            self.logger = RunLogger(
+                log_dir or cfg.get('logging.dir', 'logs'),
+                task,
+                run_name=self.run_name,
+                flush_every=cfg.get('logging.flush_every', 30),
+            )
 
-        self.recorder = None
-        self.record_every = max(1, int(record_every))
-        if record_dir:
-            if not os.path.isdir(record_dir):
-                os.makedirs(record_dir)
-            video_path = os.path.join(
-                record_dir, 'run_' + task + '_' + self.run_name + '.avi')
-            self.recorder = FrameRecorder(
-                video_path, fps=float(cfg.get('pipeline.control_hz', 30)))
+            self.record_every = max(1, int(record_every))
+            if record_dir:
+                if not os.path.isdir(record_dir):
+                    os.makedirs(record_dir)
+                # Lay stem THUC cua CSV (co the co _01 neu hai luot cung giay)
+                # de video va log khong ghi de/lech ten nhau.
+                log_stem = os.path.splitext(
+                    os.path.basename(self.logger.path))[0]
+                video_path = os.path.join(record_dir, log_stem + '.avi')
+                self.recorder = FrameRecorder(
+                    video_path,
+                    fps=float(cfg.get('pipeline.control_hz', 30)))
 
-        self.steer_look_w = float(
-            cfg.get('control.steer_lookahead_weight', 0.5))
-        self.steer_max = float(cfg.get('control.steer_max', 1.0))
-        self.control_period = 1.0 / float(cfg.get('pipeline.control_hz', 30))
+            self.steer_look_w = float(
+                cfg.get('control.steer_lookahead_weight', 0.5))
+            self.steer_max = float(cfg.get('control.steer_max', 1.0))
+            self.control_period = (
+                1.0 / float(cfg.get('pipeline.control_hz', 30)))
 
-        self._sign_reported = set()
+            self._sign_reported = set()
+            self._last_detection_seq = None
+            self._stable_sign = None
+            if self.worker is not None:
+                self.worker.start()
+        except Exception:
+            self.close()
+            raise
+
+    def _update_sign_tracker(self, detections, result_seq, now):
+        """Moi detector completion chi tao dung mot vote cho SignTracker."""
+        if self.tracker is None:
+            return None
+        if result_seq != self._last_detection_seq:
+            self._last_detection_seq = result_seq
+            self._stable_sign = self.tracker.update(detections, now=now)
+        return self._stable_sign
 
     def run(self, max_seconds=300.0, max_frames=None, auto_start=True):
         """max_seconds mac dinh 300 = dung gioi han 5 phut/luot cua BTC."""
@@ -217,15 +298,17 @@ class Runner(object):
             self.fsm.start()
         self.logger.mark_start()
 
-        t_run0 = time.time()
-        t_prev = t_run0
+        t_run0_mono = time.monotonic()
+        t_prev_mono = t_run0_mono
+        last_frame_id = None
         frames = 0
         pending_event = 'start'
 
         try:
             while True:
+                loop_t0_mono = time.monotonic()
                 loop_t0 = time.time()
-                if (loop_t0 - t_run0) >= max_seconds:
+                if (loop_t0_mono - t_run0_mono) >= max_seconds:
                     pending_event = 'timeout'
                     break
                 if max_frames is not None and frames >= max_frames:
@@ -234,10 +317,24 @@ class Runner(object):
                 frame, frame_id = self.grabber.read()
                 if frame is None:
                     if self.grabber.eof:
-                        pending_event = 'eof'
+                        pending_event = ('camera_error'
+                                         if getattr(self.grabber, 'error', None)
+                                         is not None else 'eof')
                         break
                     time.sleep(0.005)
                     continue
+                if frame_id == last_frame_id:
+                    # LatestFrameGrabber tra frame cache neu camera chua co anh
+                    # moi. Xu ly lai no se tao FPS 30 gia trong khi camera co the
+                    # dang chi ra 10 FPS (hoac da treo o mot khung hinh).
+                    if self.grabber.eof:
+                        pending_event = ('camera_error'
+                                         if getattr(self.grabber, 'error', None)
+                                         is not None else 'eof')
+                        break
+                    time.sleep(0.001)
+                    continue
+                last_frame_id = frame_id
 
                 if self.recorder is not None and frames % self.record_every == 0:
                     # Frame THO, truoc resize - LaneDetector tu resize ben
@@ -253,16 +350,20 @@ class Runner(object):
                 stop_res = self.stopline.process(proc) if self.task == 'smartcity' else None
                 moving, _ = self.motion.update(proc)
 
-                dets, det_fps = self.worker.get()
-                stable = self.tracker.update(dets, now=loop_t0)
+                if self.worker is not None:
+                    dets, det_fps, det_seq = self.worker.get()
+                    stable = self._update_sign_tracker(
+                        dets, det_seq, now=loop_t0)
+                else:
+                    det_fps, stable = 0.0, None
 
                 # ---- Decision ---------------------------------------------
                 cmd = self.fsm.step(lane_res, stopline=stop_res, sign=stable,
                                     moving=moving, now=loop_t0)
 
                 # ---- Control ----------------------------------------------
-                dt = loop_t0 - t_prev
-                t_prev = loop_t0
+                dt = loop_t0_mono - t_prev_mono
+                t_prev_mono = loop_t0_mono
                 # FPS = nhip THUC TE cua vong chinh (khoang cach giua hai lan lap),
                 # KHONG phai 1/thoi-gian-xu-ly. Neu do bang thoi gian xu ly thi con
                 # so bi thoi phong nhieu lan va khong the bao ve truoc BTC.
@@ -290,7 +391,7 @@ class Runner(object):
 
                 # ---- Log ---------------------------------------------------
                 # latency = thoi gian xu ly 1 frame (doc anh -> sinh lenh), khac FPS
-                latency_ms = (time.time() - loop_t0) * 1000.0
+                latency_ms = (time.monotonic() - loop_t0_mono) * 1000.0
 
                 sign_latency = None
                 detected, conf = '', None
@@ -330,16 +431,33 @@ class Runner(object):
 
                 # Giu nhip vong chinh on dinh (bo qua khi replay khong realtime)
                 if self.realtime:
-                    sleep = self.control_period - (time.time() - loop_t0)
+                    sleep = self.control_period - (time.monotonic() - loop_t0_mono)
                     if sleep > 0:
                         time.sleep(sleep)
+        except KeyboardInterrupt:
+            pending_event = 'keyboard_interrupt'
+        except Exception:
+            pending_event = 'pipeline_error'
+            raise
         finally:
-            self.driver.stop()
-            self.logger.write(
-                timestamp=time.time(), frame_id=frames, fps=self.fps_meter.fps,
-                decision='stop', state='FINISHED', event=pending_event or 'stop',
-            )
-            run_seconds = time.time() - t_run0
+            run_stopped_mono = time.monotonic()
+            run_stopped_wall = time.time()
+            # An toan va bang chung doc lap nhau: driver loi luc stop khong duoc
+            # ngan dong terminal/flush log; log loi cung khong duoc ngan cat ga.
+            try:
+                self.driver.stop()
+            except Exception as exc:
+                if self.verbose:
+                    print('CANH BAO: loi dung driver: %s' % exc)
+            try:
+                self.logger.write(
+                    timestamp=run_stopped_wall, frame_id=frames,
+                    fps=self.fps_meter.fps, decision='stop', state='FINISHED',
+                    event=pending_event or 'stop')
+            except Exception as exc:
+                if self.verbose:
+                    print('CANH BAO: khong ghi duoc dong ket log: %s' % exc)
+            run_seconds = run_stopped_mono - t_run0_mono
             summary = {
                 'frames': frames,
                 'seconds': run_seconds,
@@ -381,9 +499,20 @@ class Runner(object):
         return summary
 
     def close(self):
-        self.worker.stop()
-        self.grabber.stop()
-        self.driver.close()
-        self.logger.close()
+        resources = []
+        if self.worker is not None:
+            resources.append(('detect worker', self.worker.stop))
+        if self.grabber is not None:
+            resources.append(('camera grabber', self.grabber.stop))
+        if self.driver is not None:
+            resources.append(('driver', self.driver.close))
+        if self.logger is not None:
+            resources.append(('logger', self.logger.close))
         if self.recorder is not None:
-            self.recorder.close()
+            resources.append(('recorder', self.recorder.close))
+        for name, close_fn in resources:
+            try:
+                close_fn()
+            except Exception as exc:
+                if self.verbose:
+                    print('CANH BAO: loi dong %s: %s' % (name, exc))

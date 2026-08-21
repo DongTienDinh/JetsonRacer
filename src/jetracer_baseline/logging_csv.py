@@ -43,7 +43,14 @@ class RunLogger(object):
             os.makedirs(log_dir)
         if run_name is None:
             run_name = time.strftime('%Y%m%d_%H%M%S')
-        self.path = os.path.join(log_dir, 'run_' + task + '_' + run_name + '.csv')
+        stem = 'run_' + task + '_' + run_name
+        self.path = os.path.join(log_dir, stem + '.csv')
+        # Hai luot bam CHAY/DUNG trong cung mot giay khong duoc ghi de log cu.
+        # Giu timestamp de ghep video, them sequence chi khi thuc su trung ten.
+        seq = 1
+        while os.path.exists(self.path):
+            self.path = os.path.join(log_dir, '%s_%02d.csv' % (stem, seq))
+            seq += 1
         self._fh = io.open(self.path, 'w', encoding='utf-8')
         self._fh.write(u','.join(FIELDS) + u'\n')
         self._flush_every = flush_every

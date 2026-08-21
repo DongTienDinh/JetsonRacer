@@ -45,6 +45,14 @@ pipeline:
   detect_hz: 10            # luồng detect chạy chậm hơn, kết quả được cache
   fps_window: 60           # số frame để tính FPS trung bình trượt
 
+# Preview Jupyter tách khỏi pipeline xử lý. 5 Hz đủ để tune mask, không tranh
+# CPU/GPU với mục tiêu >=20 FPS của pipeline camera -> CV -> lệnh điều khiển.
+tuning:
+  preview_hz: 5
+  # 5 chu ky o muc tieu 20 FPS. Qua moc nay, lenh CV da cu -> cat motor,
+  # dong log voi event=camera_stall va yeu cau mo lai camera.
+  pipeline_stall_s: 0.25
+
 # Lai tay de thu du lieu. min_throttle bu nguong chet co/ESC: khi can vua ra
 # khoi deadzone, lenh bat dau tu 0.12 va tang den 0.30. Hieu chuan tren xe da
 # ke: tang min_throttle dan den khi banh vua quay, khong tang tuy tien.

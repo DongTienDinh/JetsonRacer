@@ -20,6 +20,10 @@ import os
 import sys
 
 
+REQUIRED_FIELDS = set(['t_rel', 'frame_id', 'fps', 'latency_ms', 'cte',
+                       'state', 'event'])
+
+
 def _f(value, default=0.0):
     try:
         return float(value)
@@ -30,9 +34,39 @@ def _f(value, default=0.0):
 def read_log(path):
     rows = []
     with io.open(path, 'r', encoding='utf-8') as fh:
-        for row in csv.DictReader(fh):
+        reader = csv.DictReader(fh)
+        if not REQUIRED_FIELDS.issubset(set(reader.fieldnames or [])):
+            return None
+        for row in reader:
             rows.append(row)
     return rows
+
+
+def _is_run_marker(row):
+    if row.get('state') == 'STARTING':
+        return True
+    # FSM cung co state FINISHED tren cac frame hop le. Marker dong file khac
+    # o cho khong co lenh dieu khien/du lieu lane.
+    return (row.get('state') == 'FINISHED' and
+            not (row.get('control_output') or '').strip() and
+            not (row.get('lane_found') or '').strip() and
+            not (row.get('n_bands') or '').strip())
+
+
+def _active_rows(rows):
+    """Chi frame pipeline that, moi frame_id mot lan."""
+    active = []
+    seen_ids = set()
+    for row in rows:
+        if _is_run_marker(row):
+            continue
+        frame_id = (row.get('frame_id') or '').strip()
+        if frame_id:
+            if frame_id in seen_ids:
+                continue
+            seen_ids.add(frame_id)
+        active.append(row)
+    return active
 
 
 def percentile(values, q):
@@ -44,14 +78,18 @@ def percentile(values, q):
 
 
 def summarise(rows):
-    cte = [abs(_f(r['cte'])) for r in rows if r.get('cte') not in (None, '')]
-    fps = [_f(r['fps']) for r in rows if _f(r['fps']) > 0]
-    lat = [_f(r['latency_ms']) for r in rows if _f(r['latency_ms']) > 0]
-    sign_lat = [_f(r['sign_latency_ms']) for r in rows
+    # Dong FINISHED chi la moc dong file, khong phai mot frame xu ly. Tinh no
+    # vao CTE/frame count se lam dep sai so va lam lech throughput.
+    active = _active_rows(rows)
+    cte = [abs(_f(r['cte'])) for r in active
+           if r.get('cte') not in (None, '')]
+    fps = [_f(r['fps']) for r in active if _f(r['fps']) > 0]
+    lat = [_f(r['latency_ms']) for r in active if _f(r['latency_ms']) > 0]
+    sign_lat = [_f(r['sign_latency_ms']) for r in active
                 if r.get('sign_latency_ms') not in (None, '')]
     t_rel = [_f(r['t_rel']) for r in rows]
 
-    lane_lost = sum(1 for r in rows if r.get('event') == 'lane_lost')
+    lane_lost = sum(1 for r in active if r.get('event') == 'lane_lost')
     events = {}
     for r in rows:
         ev = (r.get('event') or '').strip()
@@ -62,12 +100,24 @@ def summarise(rows):
     if cte:
         rms = (sum(v * v for v in cte) / len(cte)) ** 0.5
 
+    duration = max(t_rel) if t_rel else 0.0
+    # FPS trung binh ca luot = so frame MOI hoan tat / thoi gian tu CHAY den
+    # DUNG. Khong lay trung binh cac FPS cua so truot: camera stall o dau/cuoi
+    # luot co the bi che mat boi cach do cu.
+    if duration <= 0.0 and len(active) >= 2:
+        active_t = [_f(r['t_rel']) for r in active]
+        duration = max(active_t) - min(active_t)
+        throughput_frames = max(0, len(active) - 1)
+    else:
+        throughput_frames = len(active)
+    fps_mean = (float(throughput_frames) / duration) if duration > 0 else 0.0
+
     return {
-        'frames': len(rows),
-        'duration_s': (max(t_rel) - min(t_rel)) if t_rel else 0.0,
+        'frames': len(active),
+        'duration_s': duration,
         'cte_rms': rms,
         'cte_p95': percentile(cte, 0.95),
-        'fps_mean': (sum(fps) / len(fps)) if fps else 0.0,
+        'fps_mean': fps_mean,
         'fps_p05': percentile(fps, 0.05),
         'fps_min': min(fps) if fps else 0.0,
         'latency_p50': percentile(lat, 0.50),
@@ -75,7 +125,7 @@ def summarise(rows):
         'sign_latency_p95': percentile(sign_lat, 0.95),
         'sign_latency_max': max(sign_lat) if sign_lat else 0.0,
         'lane_lost_frames': lane_lost,
-        'lane_lost_rate': (float(lane_lost) / len(rows)) if rows else 0.0,
+        'lane_lost_rate': (float(lane_lost) / len(active)) if active else 0.0,
         'events': events,
     }
 
@@ -155,6 +205,7 @@ def make_plots(rows, out_dir, stem):
         print('  (bo qua bieu do: chua cai matplotlib)')
         return []
 
+    rows = _active_rows(rows)
     t = [_f(r['t_rel']) for r in rows]
     cte = [_f(r['cte']) for r in rows]
     fps = [_f(r['fps']) for r in rows]
@@ -218,6 +269,9 @@ def main(argv=None):
             print('Bo qua (khong ton tai): %s' % path)
             continue
         rows = read_log(path)
+        if rows is None:
+            print('Bo qua (khong phai schema run CSV/sidecar): %s' % path)
+            continue
         if not rows:
             print('Bo qua (rong): %s' % path)
             continue
@@ -244,7 +298,7 @@ def main(argv=None):
             print('  events              : %s' % ', '.join(
                 ['%s=%d' % (k, v) for k, v in sorted(s['events'].items())]))
 
-        if 'smartcity' in stem:
+        if stem.startswith('run_smartcity_'):
             sc = score_smart_city(s['duration_s'], args.signs_read,
                                   args.signs_total, args.missed_stops,
                                   args.ran_red)
@@ -253,7 +307,7 @@ def main(argv=None):
                   % (sc['sign'], sc['time'], sc['penalty'], sc['score']))
             if sc.get('note'):
                 print('    %s' % sc['note'])
-        else:
+        elif stem.startswith('run_speed_'):
             st = score_speed_track(s['duration_s'], args.checkpoints,
                                    s['fps_mean'], args.obstacle_hits,
                                    args.lane_departures, cp_points=args.cp_points)
